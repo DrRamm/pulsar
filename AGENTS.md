@@ -5,8 +5,8 @@ Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russia
 ## What this is
 
 A native C++ daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
-Stations: Midi (`cucumber`: aarch64, glibc 2.36, 1 GB RAM) and Lite 2 (`plum`: 32-bit armhf,
-glibc 2.30, 237 MB RAM). It exposes the speaker to Home Assistant over the ESPHome Native API
+Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
+armhf userland) and Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM). It exposes the speaker to Home Assistant over the ESPHome Native API
 (port 6053; plaintext until a Noise key is provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
 Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT). Wake word, command
@@ -103,10 +103,15 @@ go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), w
 ```
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
-(`detect_model()`, exits on unknown hardware) and by the installer (`archOf()`: codename → binary,
-`modelName()`, in `installer/probe.go`). Adding a model: hardware study first (ALSA capture
-layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in
-`src/model.cpp` and `archOf()` / `modelName()` entries.
+(`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `nativeABI()`,
+`archOf()` in `installer/probe.go`). The binary is `build/<arch>/pulsar` for the userspace whose
+dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`, `/lib/ld-linux-armhf.so.3`): the
+model's usual ABI when that loader is present. A Midi image with only the armhf loader (#13) gets
+the armhf build; a Lite 2 without it is skipped (no 64-bit plum firmware has been seen, and the
+aarch64 binary needs glibc 2.34). Adding a model: hardware study first (ALSA capture layout, VQE
+preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in `src/model.cpp` and
+`modelName()` / `nativeABI()` entries. An `archOf()` fallback is only for a second userspace ABI
+that has actually been seen on that model.
 
 Manual binary update (e.g. over ssh):
 
@@ -329,7 +334,7 @@ carried over).
 
 | | Midi (`cucumber`) | Lite 2 (`plum`) |
 |---|---|---|
-| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland with a versioned alsa-lib (the armhf build reaches its current ABI through `audio/alsa_abi.h`) | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
+| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `audio/alsa_abi.h` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
 | Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full |
 | Capture | `hw:0,2`, 8 ch @ 96 kHz: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6; ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) |
 | VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 |
