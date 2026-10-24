@@ -1,6 +1,6 @@
 # Cross-build for Yandex Stations with zig: one binary per userland ABI.
-#   ARCH=aarch64  Station Midi    (aarch64, glibc 2.36)
-#   ARCH=armhf    Station Lite 2  (32-bit ARM hard-float, glibc 2.30)
+#   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
+#   ARCH=armhf    32-bit userspace (Station Lite 2, and Midi images with an armhf userland; glibc 2.30)
 # `make` builds both; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar.
 #
 # The Sendspin player links sendspin-cpp and its dependencies statically. They are fetched once
