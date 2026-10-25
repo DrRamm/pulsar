@@ -244,15 +244,6 @@ pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
         && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
 }
 
-/// The command spotter listens whenever a microphone is open, except during a dialog
-/// (LISTENING / PROCESSING): there only in the window after the wake word ("Алиса, громче"), so
-/// the request's own words do not act as commands. Stock maind stops it at the wake word and
-/// starts it again once Alice is IDLE; the window is pulsar's. Arbitration runs in IDLE /
-/// SPEAKING (on_wake ignores the wake word in a dialog).
-pub fn commands_enabled(mic_muted: bool, phase: Phase, after_wake: bool) -> bool {
-    !mic_muted && (!matches!(phase, Phase::Listening | Phase::Processing) || after_wake)
-}
-
 /// Music of this station: playing or loading on the HA media channel or as a Sendspin stream, or
 /// paused / ended less than PAUSED_MUSIC_MS ago (Sendspin: its server still connected).
 /// `*_since`: when the media channel paused / the Sendspin stream ended; None = not since start.
@@ -275,10 +266,21 @@ pub fn owns_music(
 /// Without the wake word a station takes "стоп" (it stops only what it plays itself), the volume
 /// words while it sounds (answer, announcement, timer ring) or owns music, and transport only for
 /// its own music. After the wake word (the dialog's window, or a word held through an arbitration
-/// this station won) every command goes.
-pub fn command_allowed(c: VoiceCommand, wake: bool, sounding: bool, owns_music: bool) -> bool {
+/// this station won) every command goes. In a dialog past that window (`in_dialog`: LISTENING /
+/// PROCESSING after `after_wake` ended) only "стоп" goes and cancels the dialog: the other words
+/// belong to the request.
+pub fn command_allowed(
+    c: VoiceCommand,
+    wake: bool,
+    in_dialog: bool,
+    sounding: bool,
+    owns_music: bool,
+) -> bool {
     if wake {
         return true;
+    }
+    if in_dialog {
+        return c == VoiceCommand::Stop;
     }
     match c {
         VoiceCommand::Stop => true,

@@ -71,13 +71,10 @@ pub enum ExitReason {
 
 /// Loop timers of the C++ controller. Intended difference: C++ armed an independent timer on
 /// every call, so with two error rings pending update_ui ran at the earlier deadline (and again
-/// at the later one); here a re-arm of `UiAfterNotSubscribed` / `UiAfterError` (or
-/// `CommandsWindow`) moves the deadline. Each firing runs the same idempotent update, so the
-/// final state is identical.
+/// at the later one); here a re-arm of `UiAfterNotSubscribed` / `UiAfterError` moves the
+/// deadline. Each firing runs the same idempotent update, so the final state is identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tk {
-    /// The command window after the wake word closes.
-    CommandsWindow,
     /// The error ring of a wake word without a voice subscriber ends.
     UiAfterNotSubscribed,
     /// The error ring of a failed dialog ends.
@@ -710,7 +707,6 @@ impl Controller {
 
     fn on_timer(&mut self, k: Tk) {
         match k {
-            Tk::CommandsWindow => self.update_commands(),
             Tk::UiAfterNotSubscribed | Tk::UiAfterError => self.update_ui(),
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::TimerTick => self.show_timers(),
