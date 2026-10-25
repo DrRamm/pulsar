@@ -495,6 +495,9 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon, std::vec
   update_duck();
   if (earcon) player_.play(Channel::ANNOUNCE, {kSndWake});
   const uint64_t dialog = dialog_;
+  // A previous answer still marked open must be closed before this start, or HA forces idle
+  // over the new listening state when AnnounceFinished arrives late.
+  release_tts(false);
   api_->voice_request_start(phrase);
   if (dialog != dialog_) return;  // sending failed and closed the voice client, which ended the dialog
   // HA drops audio queued before the start and queues what follows it on the same connection.
@@ -558,6 +561,11 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
     case VaEvent::INTENT_END:
       continue_conversation_ = get("continue_conversation") == "1";
       break;
+    case VaEvent::TTS_START:
+      // HA stays "responding" from this event until AnnounceFinished, even if no audio follows.
+      tts_ha_open_ = true;
+      if (tts_played_ && phase_ != Phase::SPEAKING) release_tts(true);
+      break;
     case VaEvent::TTS_END:
       if (!get("url").empty()) tts_url_ = get("url");
       play_tts();
@@ -571,13 +579,17 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       }
       LOGW("pipeline error: %s %s", get("code").c_str(), get("message").c_str());
       stop_streaming();
+      if (!tts_played_) release_tts(false);
       error_shown_ = true;
       show_ui(UiState::ERROR);
       if (get("code") != "stt-no-text-recognized") play_closing_earcon(kSounds + model_.error_sound);
       break;
     case VaEvent::RUN_END:
       stop_streaming();
-      if (!tts_played_) finish_interaction();
+      if (!tts_played_) {
+        release_tts(false);  // TTS_START with no playback would leave HA in "responding"
+        finish_interaction();
+      }
       break;
     default:
       break;
@@ -598,12 +610,23 @@ void Controller::play_tts() {
 
 // A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
 void Controller::tts_finished(bool ok) {
+  // Before a continued dialog's voice_request_start: HA applies AnnounceFinished by forcing idle.
+  release_tts(ok);
   if (ok && continue_conversation_ && !timer_ringing_ && !st_.mic_muted && !hw_mic_muted_) {
     continue_conversation_ = false;
     start_pipeline("", false);
     return;
   }
   finish_interaction();
+}
+
+void Controller::release_tts(bool success) {
+  if (!tts_ha_open_) return;
+  tts_ha_open_ = false;
+  // An announcement that took the channel reports its own end; that message closes HA's wait.
+  if (announcing_) return;
+  LOGI("voice: answer playback %s", success ? "finished" : "cut short");
+  api_->voice_announce_finished(success);
 }
 
 void Controller::finish_interaction() {
@@ -614,6 +637,7 @@ void Controller::finish_interaction() {
     stop_sent_ = true;
   }
   awaiting_run_start_ = false;
+  release_tts(false);
   mic_.set_streaming(arbitrating_);
   phase_ = Phase::IDLE;
   dialog_++;
@@ -666,11 +690,17 @@ void Controller::arm_watchdog() {
 // completion callback then only reports to HA); the dialog of an interrupted answer is ended or
 // replaced by the caller, otherwise by the TTS completion callback.
 void Controller::interrupt_speech() {
+  const bool tts = phase_ == Phase::SPEAKING;
+  const bool ann = announcing_;
   player_.stop(Channel::ANNOUNCE);
   if (announcing_) {
     announcing_ = false;
     announce_seq_++;
   }
+  // Before the caller starts another pipeline. The announcement callback sends its own finished;
+  // a bare answer has no other sender. The playback callback runs after we return.
+  if (tts && !ann) release_tts(false);
+  else if (tts) tts_ha_open_ = false;
 }
 
 // Error and cancel sounds outlive the dialog they close; music stays ducked until they end.

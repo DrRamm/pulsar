@@ -384,6 +384,9 @@ media playback, LED animations.
 - Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
   replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
   `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
+  HA 2026.9 stays "responding" after TTS_START until AnnounceFinished (`release_tts`): sent once
+  when the answer ends or is cut short, and before the next `voice_request_start` (a late one
+  would force idle over the new listening state).
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes

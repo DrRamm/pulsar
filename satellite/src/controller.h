@@ -98,6 +98,9 @@ class Controller : public ApiHooks {
   void stop_streaming();
   void play_tts();
   void tts_finished(bool ok);
+  // HA 2026.9 leaves the satellite in "responding" after TTS_START until AnnounceFinished.
+  // Sent once per such run: after the answer plays out, or when it is cut short / never starts.
+  void release_tts(bool success);
   void finish_interaction();
   void voice_link_lost();
   void abort_dialog(const char *why);
@@ -165,6 +168,7 @@ class Controller : public ApiHooks {
   bool stop_sent_ = false;           // voice_request_stop already sent for this dialog's run
   std::string tts_url_;
   bool tts_played_ = false;
+  bool tts_ha_open_ = false;  // TTS_START seen; AnnounceFinished not sent yet
   bool continue_conversation_ = false;
   bool announcing_ = false;  // an HA announcement (assist or media player) plays on ANNOUNCE
   bool ducked_ = false;
