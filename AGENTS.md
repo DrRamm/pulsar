@@ -212,9 +212,11 @@ From `/system/vendor/quasar/libyandex_evil.so`:
   (`logic::command_allowed`): "стоп" / "хватит" everywhere, volume while it sounds (answer,
   announcement, timer ring) or owns music, pause / resume / next / previous only for its own music
   (`logic::owns_music`: playing or loading locally or over Sendspin, or paused / Sendspin stream
-  ended less than 2 h ago with the server still connected). A word held through a won arbitration
-  ("Алиса, тише" during an answer) leaves the answer playing; only a word in the dialog's own
-  window cancels the HA pipeline.
+  ended less than 2 h ago with the server still connected). A command word recognised before a
+  won arbitration ends is held and leaves the answer playing (no dialog starts); spoken "Алиса,
+  тише" during an answer can be recognised after it (seen on a Midi: 53 ms), when the barge-in has
+  already cut the answer: it then acts in the new dialog's window and cancels that dialog's HA
+  pipeline.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
