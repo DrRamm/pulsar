@@ -138,7 +138,6 @@ impl Controller {
         self.arb_audio.clear();
         self.arb_command.clear();
         self.mic.set_streaming(true);
-        self.update_commands();
         self.update_ui();
         let busy = self.phase == Phase::Speaking || self.announcing;
         self.arb_claim = Some(self.arbiter.claim(&self.st.wake_word, level_db, busy, true));
@@ -173,7 +172,6 @@ impl Controller {
             );
             // Its command spotter would still act on "Алиса, громче" if it sounds or owns music.
             self.commands_blocked_until_ms = now_ms() + COMMAND_AFTER_WAKE_MS;
-            self.update_commands();
             self.update_ui();
             return;
         }
@@ -181,7 +179,6 @@ impl Controller {
         if !command.is_empty() {
             // "Алиса, громче": handled locally, as right after the wake word.
             self.mic.set_streaming(false);
-            self.update_commands();
             self.update_ui();
             return self.on_command(&command, true);
         }
@@ -227,8 +224,6 @@ impl Controller {
         self.run.start();
         self.stop_sent = false;
         self.listen_started_ms = now_ms();
-        self.timers
-            .set(Tk::CommandsWindow, (COMMAND_AFTER_WAKE_MS + 100) as u64);
         self.tts_url.clear();
         self.tts_played = false;
         self.continue_conversation = false;
@@ -256,7 +251,6 @@ impl Controller {
         self.mic.set_streaming(self.arbitrating);
         if self.phase == Phase::Listening {
             self.phase = Phase::Processing;
-            self.update_commands();
         }
     }
 
@@ -400,7 +394,6 @@ impl Controller {
         self.arm_watchdog();
         if self.error_shown {
             self.error_shown = false;
-            self.update_commands(); // the ui, which also does it, waits for the error ring
             self.timers.set(Tk::UiAfterError, 1200);
         } else {
             self.update_ui();
@@ -462,15 +455,21 @@ impl Controller {
         self.play_announce(vec![path], Pending::Earcon { seq });
     }
 
+    /// Cancels a LISTENING / PROCESSING dialog: the action button's short press and "стоп" past
+    /// the window after the wake word. An announcement playing over the dialog goes with it.
+    fn cancel_dialog(&mut self) {
+        self.interrupt_speech();
+        self.play_closing_earcon(SND_CANCEL.into());
+        self.finish_interaction();
+    }
+
     /// The Button's short press.
     pub(super) fn action_button(&mut self) {
         if self.timer_ringing {
             return self.stop_timer_ring();
         }
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
-            self.interrupt_speech(); // an announcement playing over the dialog goes with it
-            self.play_closing_earcon(SND_CANCEL.into());
-            return self.finish_interaction();
+            return self.cancel_dialog();
         }
         if self.phase == Phase::Speaking || self.announcing {
             self.interrupt_speech();
@@ -629,15 +628,10 @@ impl Controller {
     // ---------------- local commands ----------------
 
     /// Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше",
-    /// "назад"): on unless muted or in a dialog past the window after its wake word
-    /// (logic::commands_enabled).
+    /// "назад"): on unless the microphone is muted, the dialog included; which words act where is
+    /// logic::command_allowed.
     pub(super) fn update_commands(&self) {
-        let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
-        self.mic.set_commands(logic::commands_enabled(
-            self.mic_muted(),
-            self.phase,
-            after_wake,
-        ));
+        self.mic.set_commands(!self.mic_muted());
     }
 
     fn owns_music(&self) -> bool {
@@ -698,9 +692,22 @@ impl Controller {
             return;
         }
         let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
+        // A dialog past the window after its wake word: its words are the request's, except
+        // "стоп".
+        let in_dialog = matches!(self.phase, Phase::Listening | Phase::Processing) && !after_wake;
         let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
-        if !logic::command_allowed(c, held || after_wake, sounding, self.owns_music()) {
-            info!("voice command '{word}' ignored: not for this station");
+        if !logic::command_allowed(
+            c,
+            held || after_wake,
+            in_dialog,
+            sounding,
+            self.owns_music(),
+        ) {
+            if in_dialog {
+                info!("voice command '{word}' ignored: part of the request");
+            } else {
+                info!("voice command '{word}' ignored: not for this station");
+            }
             return;
         }
         info!(
@@ -709,12 +716,14 @@ impl Controller {
                 " (after wake word, HA pipeline cancelled)"
             } else if held {
                 " (after wake word)"
+            } else if in_dialog {
+                " (in a dialog)"
             } else {
                 ""
             }
         );
-        // Only a word in the dialog's own window cancels it: one held through an arbitration in
-        // SPEAKING / IDLE leaves the answer playing.
+        // A word in the dialog's own window ends the dialog first; one held through an
+        // arbitration in SPEAKING / IDLE leaves the answer playing.
         if after_wake {
             self.finish_interaction();
         }
@@ -722,6 +731,8 @@ impl Controller {
             VoiceCommand::Stop => {
                 if self.timer_ringing {
                     self.stop_timer_ring();
+                } else if in_dialog {
+                    self.cancel_dialog();
                 } else if self.phase == Phase::Speaking {
                     self.interrupt_speech();
                     self.finish_interaction();
@@ -757,6 +768,5 @@ impl Controller {
                 }
             }
         }
-        self.update_commands();
     }
 }

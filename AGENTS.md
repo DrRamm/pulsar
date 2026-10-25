@@ -202,13 +202,19 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - Spotter type → VQE output: type 0 = main channel. The wake model (`spotter_models/activation/alisa`)
   needs `VQE_OMNI_WITH_GAIN` (9); the command model (`spotter_models/command`, single channel)
   only works with `VQE_OMNI` (6). Measured with `ww_offline`; re-measure when changing it.
-- The command spotter listens whenever a microphone is open except during a dialog: in LISTENING /
-  PROCESSING only for the 2.5 s after the wake word ("Алиса, громче"; `logic::commands_enabled`),
-  so the request's own words do not act as commands. Stock maind does the same around the dialog
-  (Midi 0.351: `stopCommandSpotter reason: external` at the wake word, `startCommandSpotter …
-  reason: aliceStateChanged` back in IDLE with nothing playing); the 2.5 s window is pulsar's
-  (stock leaves "Алиса, громче" to the cloud). Command words have no arbitration between
-  stations, so without the wake word a station acts only on what is its own
+- The command spotter listens whenever a microphone is open (`update_commands`: off only while
+  muted), the dialog included. In LISTENING / PROCESSING every command word acts only for the
+  2.5 s after the wake word ("Алиса, громче"; `logic::after_wake`); past that window only "стоп" /
+  "хватит" act (`logic::command_allowed`), so the request's other words do not act as commands.
+  They cancel the dialog like the action button (`cancel_dialog`: cancel earcon,
+  `voice_request_stop`, music left playing; a ringing timer is stopped instead), and a stop word
+  inside the request ("хватит ли …") cancels it too. Stock maind stops the spotter at the wake
+  word and starts it again once Alice is IDLE (Midi 0.351: `stopCommandSpotter reason: external`
+  at the wake word, `startCommandSpotter … reason: aliceStateChanged` back in IDLE with nothing
+  playing); the 2.5 s window and the stop words in a dialog are pulsar's (stock leaves both to the
+  cloud). Stock treats "стоп", "хватит" and "пауза" as one music action ("Остановить / поставить
+  на паузу" in Yandex's command reference), so "стоп" pauses. Command words have no arbitration
+  between stations, so without the wake word a station acts only on what is its own
   (`logic::command_allowed`): "стоп" / "хватит" everywhere, volume while it sounds (answer,
   announcement, timer ring) or owns music, pause / resume / next / previous only for its own music
   (`logic::owns_music`: playing or loading locally or over Sendspin, or paused / Sendspin stream

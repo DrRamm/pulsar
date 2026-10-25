@@ -194,22 +194,6 @@ fn command_gating() {
     assert!(!after_wake(Phase::Processing, 12_500, 10_000));
     assert!(!after_wake(Phase::Idle, 10_001, 10_000));
     assert!(!after_wake(Phase::Speaking, 10_001, 10_000));
-    // Everywhere but in a dialog past its window.
-    for phase in [Phase::Idle, Phase::Speaking] {
-        assert!(commands_enabled(false, phase, false), "{phase:?}");
-    }
-    for phase in [Phase::Listening, Phase::Processing] {
-        assert!(!commands_enabled(false, phase, false), "{phase:?}");
-    }
-    assert!(commands_enabled(false, Phase::Listening, true));
-    for phase in [
-        Phase::Idle,
-        Phase::Listening,
-        Phase::Processing,
-        Phase::Speaking,
-    ] {
-        assert!(!commands_enabled(true, phase, true), "{phase:?}");
-    }
 }
 
 #[test]
@@ -262,24 +246,35 @@ fn command_permission() {
     use VoiceCommand::*;
     for c in [Stop, Pause, Resume, Louder, Quieter, Next, Prev] {
         assert!(
-            command_allowed(c, true, false, false),
+            command_allowed(c, true, false, false, false),
             "{c:?} after the wake word"
         );
         assert!(
-            command_allowed(c, false, false, true),
+            command_allowed(c, false, false, false, true),
             "{c:?} with own music"
         );
         // Silent, no music of its own: only "стоп".
         assert_eq!(
-            command_allowed(c, false, false, false),
+            command_allowed(c, false, false, false, false),
             c == Stop,
             "{c:?} silent"
         );
         // Answer / announcement / ring, no music: "стоп" and volume.
         assert_eq!(
-            command_allowed(c, false, true, false),
+            command_allowed(c, false, false, true, false),
             matches!(c, Stop | Louder | Quieter),
             "{c:?} sounding"
+        );
+        // A dialog past the window: only "стоп", whatever sounds or plays.
+        assert_eq!(
+            command_allowed(c, false, true, true, true),
+            c == Stop,
+            "{c:?} in a dialog"
+        );
+        assert_eq!(
+            command_allowed(c, false, true, false, false),
+            c == Stop,
+            "{c:?} in a silent dialog"
         );
     }
 }
