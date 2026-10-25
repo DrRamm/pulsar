@@ -4,8 +4,8 @@
 //! usage: frontend_probe [seconds=30] [--wake alisa|yandex] [--stream] [--music] [--commands]
 //!                       [--record <wav> <seconds>]
 //! Without --commands only the wake word spotter runs (the daemon runs the command spotter too,
-//! except in a dialog past the window after the wake word). --record writes the first <seconds>
-//! of the raw capture (all channels, S16) as a WAV for ww_offline. No sound is played.
+//! unless the microphone is muted). --record writes the first <seconds> of the raw capture (all
+//! channels, S16) as a WAV for ww_offline. No sound is played.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
