@@ -23,6 +23,16 @@ constexpr const char *kCommandModel = "/system/vendor/quasar/spotter_models/comm
 // After the wake word a stock command ("Алиса, громче") is handled locally if it is heard
 // within this window; the HA pipeline is then cancelled.
 constexpr int64_t kCommandAfterWakeMs = 2500;
+
+// One platform level of Model::volume_map (stock changeStepPercent, 5 %). A 10 % step is two
+// levels: from level 2 it lands just above 0, the clock shows 0, and level 1 (the lowest audible
+// stock step) is skipped.
+float stock_volume_step(float volume, int top, int delta) {
+  if (top < 1) return std::clamp(volume, 0.f, 1.f);
+  int level = int(std::lround(double(volume) * top));
+  level = std::clamp(level + delta, 0, top);
+  return float(level) / float(top);
+}
 constexpr const char *kSounds = "/system/vendor/quasar/sounds/";
 const std::string kSndWake = std::string(kSounds) + "common/spotter_start.mp3";
 const std::string kSndCancel = std::string(kSounds) + "common/spotter_cancel.mp3";
@@ -1445,7 +1455,9 @@ void Controller::on_command(const std::string &word) {
       break;
     case LOUDER:
     case QUIETER:
-      set_volume(st_.volume + (c == LOUDER ? 0.1f : -0.1f), true);
+      set_volume(stock_volume_step(st_.volume, model_.volume_map.empty() ? 0 : model_.volume_map.back().level,
+                                   c == LOUDER ? 1 : -1),
+                 true);
       break;
     case NEXT:
     case PREV:
