@@ -41,7 +41,8 @@ struct Settings {
   float led_speed = 1;             // 0.25..4
   bool voice_indication = true;    // listening / thinking / speaking shown on the ring and the clock
   // Stock command words ("тише", "громче", "стоп", "продолжи", …) with no wake word. Off: the
-  // command spotter runs only while something plays and for 2.5 s after the wake word.
+  // command spotter runs only while something plays, for 2.5 s after the wake word, and while a
+  // dialog is open so "стоп" ends it instead of becoming the request.
   bool quick_commands = true;
   std::string led_case_color;      // stem of Leds::case_colors(), "" = none
   // Release being installed. Still set after a restart into another version: that release was

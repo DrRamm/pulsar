@@ -198,8 +198,11 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - The command spotter (`spotter_models/command`) hears stock words with no wake word ("тише",
   "громче", "стоп", "продолжи", …). Switch "Quick commands" (`quick_commands=`, default 1) feeds
   it whenever the microphone is open, including silence and pause. Off, it runs only while
-  something plays, during TTS/announcements/timer ring, or 2.5 s after the wake word, so a
-  conversation does not trip it. "Алиса, громче" in that window still works with the switch off.
+  something plays, during TTS/announcements/timer ring, for 2.5 s after the wake word, or while
+  a dialog is open, so a conversation does not trip it and "стоп" still ends that dialog instead
+  of becoming the request. "Алиса, громче" in the 2.5 s window still works with the switch off.
+  "стоп" / "хватит" stop the dialog, speech, announcements, the timer ring and playback (music
+  and Sendspin); "пауза" only pauses.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.

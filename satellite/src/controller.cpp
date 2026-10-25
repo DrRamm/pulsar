@@ -1361,13 +1361,15 @@ void Controller::on_active_wake_words(const std::vector<std::string> &ids) {
 
 // Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше", "назад").
 // "Quick commands" feeds it whenever the mic is open, including silence and pause (as on stock).
-// Off: only while something plays, and for 2.5 s after the wake word ("Алиса, громче").
+// Off: while something plays, for 2.5 s after the wake word ("Алиса, громче"), and for the whole
+// dialog — otherwise "стоп" said after that window is the request the assistant hears.
 void Controller::update_commands() {
   bool playing = player_.state(Channel::MUSIC) == PlayState::PLAYING || (sendspin_ && sendspin_->streaming()) ||
                  announcing_ || timer_ringing_ || phase_ == Phase::SPEAKING;
   bool after_wake =
       (phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs) || arbitrating_;
-  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (st_.quick_commands || playing || after_wake));
+  bool dialog = phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING;
+  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (st_.quick_commands || playing || after_wake || dialog));
 }
 
 bool Controller::music_pause() {
@@ -1411,25 +1413,30 @@ void Controller::on_command(const std::string &word) {
     return;
   }
   bool after_wake = phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
-  LOGI("voice command '%s'%s", word.c_str(), after_wake ? " (after wake word, HA pipeline cancelled)" : "");
-  if (after_wake) {
-    finish_interaction();
-  }
+  // "стоп" looks at the phase itself. Finishing the dialog first would hide speech and the run.
+  LOGI("voice command '%s'%s", word.c_str(),
+       (after_wake && c != STOP) || (c == STOP && phase_ != Phase::IDLE) ? " (HA pipeline cancelled)" : "");
+  if (after_wake && c != STOP) finish_interaction();
   switch (c) {
-    case STOP:
-      if (timer_ringing_) {
+    case STOP: {
+      // Full stop: the word must not become the assistant's request, and playback must not resume.
+      const PlayState music = player_.state(Channel::MUSIC);
+      const bool show_pause = music == PlayState::PLAYING || music == PlayState::LOADING ||
+                              music == PlayState::PAUSED || (sendspin_ && sendspin_->streaming());
+      if (timer_ringing_)
         stop_timer_ring();
-      } else if (phase_ == Phase::SPEAKING) {
+      else if (phase_ == Phase::SPEAKING || announcing_)
         interrupt_speech();
-        finish_interaction();
-      } else if (announcing_) {  // a dialog listening meanwhile goes on
-        interrupt_speech();
-        update_duck();
-        update_ui();
-      } else {
-        if (music_pause()) clock_.play(ClockShot::PAUSE);
+      if (phase_ != Phase::IDLE) finish_interaction();
+      player_.stop(Channel::ANNOUNCE);  // closing earcon or a volume click still on the channel
+      player_.stop(Channel::MUSIC);
+      if (sendspin_ && sendspin_->connected()) {
+        if (!sendspin_->transport(SendspinService::Transport::STOP) && sendspin_->streaming())
+          sendspin_->yield_to_local();
       }
+      if (show_pause) clock_.play(ClockShot::PAUSE);
       break;
+    }
     case PAUSE:
       if (music_pause()) clock_.play(ClockShot::PAUSE);
       break;
