@@ -195,8 +195,11 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - Spotter type → VQE output: type 0 = main channel. The wake model (`spotter_models/activation/alisa`)
   needs `VQE_OMNI_WITH_GAIN` (9); the command model (`spotter_models/command`, single channel)
   only works with `VQE_OMNI` (6). Measured with `ww_offline`; re-measure when changing it.
-- The command spotter only runs while something plays, during TTS/announcements/timer ring, or
-  2.5 s after the wake word (as `maind` does), to avoid false positives from conversation.
+- The command spotter only runs while something plays, during TTS/announcements/timer ring, for
+  2.5 s after the wake word (as `maind` does), or while a dialog is open, so a conversation does
+  not trip it and "стоп" still ends that dialog instead of becoming the request. "стоп" / "хватит"
+  stop the dialog, speech, announcements, the timer ring and playback (music and Sendspin);
+  "пауза" only pauses.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
