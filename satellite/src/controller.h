@@ -40,10 +40,6 @@ struct Settings {
   std::string clock_music = "Off";       // one of Clock::music_styles()
   float led_speed = 1;             // 0.25..4
   bool voice_indication = true;    // listening / thinking / speaking shown on the ring and the clock
-  // Stock command words ("тише", "громче", "стоп", "продолжи", …) with no wake word. Off: the
-  // command spotter runs only while something plays, for 2.5 s after the wake word, and while a
-  // dialog is open so "стоп" ends it instead of becoming the request.
-  bool quick_commands = true;
   std::string led_case_color;      // stem of Leds::case_colors(), "" = none
   // Release being installed. Still set after a restart into another version: that release was
   // rolled back by supervise.sh (crash loop), automatic updates skip it.
@@ -94,16 +90,19 @@ class Controller : public ApiHooks {
   void arbitration_done(bool won, const WakeArbiter::Claim &best, size_t peers);
   void cancel_arbitration();
   bool arbitration_on() const { return st_.nearest_answers && arbiter_ok_; }
-  void on_command(const std::string &word);
+  void on_command(const std::string &word, bool wake);
   void update_commands();
+  bool after_wake() const;  // in the 2.5 s after a wake word, before the dialog's speech is done
+  bool owns_music() const;  // this station has music playing, paused or streaming
   bool music_pause();  // true when something was playing
   void music_resume();
   void start_pipeline(const std::string &phrase, bool earcon, std::vector<int16_t> preroll = {});
   void stop_streaming();
   void play_tts();
   void tts_finished(bool ok);
-  // HA 2026.9 leaves the satellite in "responding" after TTS_START until AnnounceFinished.
-  // Sent once per such run: after the answer plays out, or when it is cut short / never starts.
+  // HA leaves the satellite in "responding" after TTS_START until AnnounceFinished (not new in
+  // 2026.9: HA has had it since 2024.12). Sent once per such run: after the answer plays out, or when
+  // it is cut short / never starts.
   void release_tts(bool success);
   void finish_interaction();
   void voice_link_lost();
@@ -175,6 +174,7 @@ class Controller : public ApiHooks {
   bool tts_ha_open_ = false;  // TTS_START seen; AnnounceFinished not sent yet
   bool continue_conversation_ = false;
   bool announcing_ = false;  // an HA announcement (assist or media player) plays on ANNOUNCE
+  bool assist_announcing_ = false;  // ...and it is an assist one: its completion sends AnnounceFinished
   bool ducked_ = false;
   bool closing_earcon_ = false;
   uint64_t earcon_seq_ = 0;

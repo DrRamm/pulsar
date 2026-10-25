@@ -112,7 +112,6 @@ bool Settings::load(const std::string &path) {
     else if (k == "clock_music") clock_music = v;
     else if (k == "led_speed") led_speed = std::isfinite(fv) ? std::clamp(fv, 0.25f, 4.f) : 1.f;
     else if (k == "voice_indication") voice_indication = v == "1";
-    else if (k == "quick_commands") quick_commands = v == "1";
     else if (k == "led_case_color") led_case_color = v;
   }
   const auto &styles = Leds::music_styles();
@@ -139,7 +138,6 @@ void Settings::save(const std::string &path) const {
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
       << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\nmusic_viz=" << music_viz
       << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication
-      << "\nquick_commands=" << quick_commands
       << "\nled_case_color=" << led_case_color << "\nclock_music=" << clock_music << "\n";
   }
   rename(tmp.c_str(), path.c_str());
@@ -315,7 +313,7 @@ bool Controller::start() {
   }
 
   mic_.on_wake([this](const std::string &phrase, float level_db) { on_wake(phrase, level_db); });
-  mic_.on_command([this](const std::string &word) { on_command(word); });
+  mic_.on_command([this](const std::string &word) { on_command(word, after_wake()); });
   mic_.on_audio([this](const int16_t *pcm, size_t n) {
     if (phase_ == Phase::LISTENING)
       api_->voice_send_audio(pcm, n);
@@ -361,7 +359,6 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
   api_->publish_switch(SwitchId::NEAREST_ANSWERS, st_.nearest_answers);
   api_->publish_switch(SwitchId::VOICE_INDICATION, st_.voice_indication);
-  api_->publish_switch(SwitchId::QUICK_COMMANDS, st_.quick_commands);
   publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
@@ -394,9 +391,12 @@ void Controller::on_voice_subscribed(bool subscribed) {
 // next. A dialog still listening or thinking ends now. An answer already playing is fetched over
 // HTTP independently of the API link, so it plays out (still ducked) and its end closes the
 // dialog; a stream that dies with HA ends it through the player instead.
+// The AnnounceFinished owed for an answer belongs to the client that started it: it is dropped,
+// not sent to whichever client subscribes next (it could have an announcement waiting).
 void Controller::voice_link_lost() {
   awaiting_run_start_ = run_active_ = stale_run_end_ = false;
   continue_conversation_ = false;
+  tts_ha_open_ = false;
   if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) finish_interaction();
 }
 
@@ -469,7 +469,7 @@ void Controller::arbitration_done(bool won, const WakeArbiter::Claim &best, size
     mic_.set_streaming(false);
     update_commands();
     update_ui();
-    return on_command(command);
+    return on_command(command, true);
   }
   // Capture keeps streaming into the new dialog: switching it off here could drop the chunk
   // between the preroll and live audio.
@@ -551,6 +551,11 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
     run_active_ = false;
   }
   if (phase_ == Phase::IDLE) {  // the run of a dialog that already ended; it is being stopped
+    // HA still waits for AnnounceFinished after a TTS_START, even though nothing plays for it here.
+    if (type == VaEvent::TTS_START) {
+      tts_ha_open_ = true;
+      release_tts(false);
+    }
     LOGD("voice event %u: dialog already ended, ignored", (unsigned)type);
     return;
   }
@@ -576,9 +581,8 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       continue_conversation_ = get("continue_conversation") == "1";
       break;
     case VaEvent::TTS_START:
-      // HA stays "responding" from this event until AnnounceFinished, even if no audio follows.
+      // Opens the wait for AnnounceFinished, closed by the answer's end or by finish_interaction.
       tts_ha_open_ = true;
-      if (tts_played_ && phase_ != Phase::SPEAKING) release_tts(true);
       break;
     case VaEvent::TTS_END:
       if (!get("url").empty()) tts_url_ = get("url");
@@ -593,17 +597,13 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       }
       LOGW("pipeline error: %s %s", get("code").c_str(), get("message").c_str());
       stop_streaming();
-      if (!tts_played_) release_tts(false);
       error_shown_ = true;
       show_ui(UiState::ERROR);
       if (get("code") != "stt-no-text-recognized") play_closing_earcon(kSounds + model_.error_sound);
       break;
     case VaEvent::RUN_END:
       stop_streaming();
-      if (!tts_played_) {
-        release_tts(false);  // TTS_START with no playback would leave HA in "responding"
-        finish_interaction();
-      }
+      if (!tts_played_) finish_interaction();  // an answer still playing ends the dialog itself
       break;
     default:
       break;
@@ -634,11 +634,13 @@ void Controller::tts_finished(bool ok) {
   finish_interaction();
 }
 
+// Sent from the answer's playback callback, from start_pipeline (before voice_request_start), from
+// finish_interaction and for a TTS_START that arrives while idle. Only an assist announcement
+// reports its own end, so a media_player announcement that cut the answer short does not swallow it.
 void Controller::release_tts(bool success) {
   if (!tts_ha_open_) return;
   tts_ha_open_ = false;
-  // An announcement that took the channel reports its own end; that message closes HA's wait.
-  if (announcing_) return;
+  if (assist_announcing_) return;
   LOGI("voice: answer playback %s", success ? "finished" : "cut short");
   api_->voice_announce_finished(success);
 }
@@ -651,6 +653,7 @@ void Controller::finish_interaction() {
     stop_sent_ = true;
   }
   awaiting_run_start_ = false;
+  // HA waits for AnnounceFinished after a TTS_START even when no answer plays (or it was cut short).
   release_tts(false);
   mic_.set_streaming(arbitrating_);
   phase_ = Phase::IDLE;
@@ -701,20 +704,16 @@ void Controller::arm_watchdog() {
 }
 
 // Cuts the TTS answer or HA announcement short. An interrupted announcement ends here (its
-// completion callback then only reports to HA); the dialog of an interrupted answer is ended or
-// replaced by the caller, otherwise by the TTS completion callback.
+// completion callback then only reports to HA). An interrupted answer's dialog is ended or replaced
+// by the caller, whose start_pipeline / finish_interaction sends its AnnounceFinished; when the
+// caller keeps the dialog (the timer ring), the playback callback ends it after we return.
 void Controller::interrupt_speech() {
-  const bool tts = phase_ == Phase::SPEAKING;
-  const bool ann = announcing_;
   player_.stop(Channel::ANNOUNCE);
   if (announcing_) {
     announcing_ = false;
+    assist_announcing_ = false;
     announce_seq_++;
   }
-  // Before the caller starts another pipeline. The announcement callback sends its own finished;
-  // a bare answer has no other sender. The playback callback runs after we return.
-  if (tts && !ann) release_tts(false);
-  else if (tts) tts_ha_open_ = false;
 }
 
 // Error and cancel sounds outlive the dialog they close; music stays ducked until they end.
@@ -738,6 +737,7 @@ void Controller::on_announce(const AnnounceRequest &req) {
   if (!req.preannounce_media_id.empty()) urls.push_back(req.preannounce_media_id);
   urls.push_back(req.media_id);
   announcing_ = true;
+  assist_announcing_ = true;
   const bool conv = req.start_conversation;
   const uint64_t seq = ++announce_seq_;
   update_duck();
@@ -747,6 +747,7 @@ void Controller::on_announce(const AnnounceRequest &req) {
     api_->voice_announce_finished(ok);  // exactly once per announcement, also when cut short
     if (seq == announce_seq_) {
       announcing_ = false;
+      assist_announcing_ = false;
       if (ok && conv && phase_ == Phase::IDLE && !timer_ringing_ && !st_.mic_muted && !hw_mic_muted_)
         start_pipeline("", false);
       end_announce();
@@ -1018,6 +1019,7 @@ void Controller::on_media_command(const MediaCommandRequest &cmd) {
     if (cmd.has_announcement && cmd.announcement) {
       // Media-player announcements report completion through state only.
       announcing_ = true;
+      assist_announcing_ = false;  // owes no AnnounceFinished, so it must not hold back an answer's
       const uint64_t seq = ++announce_seq_;
       update_duck();
       update_ui();
@@ -1115,9 +1117,6 @@ void Controller::on_switch(SwitchId id, bool state) {
     st_.voice_indication = state;
     leds_.set_voice_indication(state);
     clock_.set_voice_indication(state);
-  } else if (id == SwitchId::QUICK_COMMANDS) {
-    st_.quick_commands = state;
-    update_commands();
   }
   api_->publish_switch(id, state);
   persist();
@@ -1370,16 +1369,23 @@ void Controller::on_active_wake_words(const std::vector<std::string> &ids) {
 }
 
 // Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше", "назад").
-// "Quick commands" feeds it whenever the mic is open, including silence and pause (as on stock).
-// Off: while something plays, for 2.5 s after the wake word ("Алиса, громче"), and for the whole
-// dialog — otherwise "стоп" said after that window is the request the assistant hears.
+// It listens in silence, pause and playback, as on stock. From the wake word until the dialog is
+// back in IDLE it listens only for the 2.5 s after the wake word ("Алиса, громче"): the request's
+// speech must not be heard as commands, and "стоп" said after that window is the request the
+// assistant hears.
 void Controller::update_commands() {
-  bool playing = player_.state(Channel::MUSIC) == PlayState::PLAYING || (sendspin_ && sendspin_->streaming()) ||
-                 announcing_ || timer_ringing_ || phase_ == Phase::SPEAKING;
-  bool after_wake =
-      (phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs) || arbitrating_;
-  bool dialog = phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING;
-  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (st_.quick_commands || playing || after_wake || dialog));
+  const bool in_dialog = phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING;
+  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (!in_dialog || after_wake()));
+}
+
+bool Controller::after_wake() const {
+  return phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
+}
+
+bool Controller::owns_music() const {
+  const PlayState ps = player_.state(Channel::MUSIC);
+  return ps == PlayState::PLAYING || ps == PlayState::LOADING || ps == PlayState::PAUSED ||
+         (sendspin_ && sendspin_->streaming());
 }
 
 bool Controller::music_pause() {
@@ -1402,7 +1408,8 @@ void Controller::music_resume() {
     sendspin_->transport(SendspinService::Transport::PLAY);
 }
 
-void Controller::on_command(const std::string &word) {
+// `wake`: the word came after a wake word (the 2.5 s window, or the held command of an arbitration).
+void Controller::on_command(const std::string &word, bool wake) {
   if (st_.mic_muted || hw_mic_muted_) return;
   enum { NONE, STOP, PAUSE, RESUME, LOUDER, QUIETER, NEXT, PREV } c = NONE;
   if (word == "стоп" || word == "хватит") c = STOP;
@@ -1422,11 +1429,16 @@ void Controller::on_command(const std::string &word) {
     LOGI("voice command '%s' held until the wake arbitration ends", word.c_str());
     return;
   }
-  bool after_wake = phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
+  // Every station that hears a word without the wake word would act on it: only a station with
+  // music of its own takes the transport and volume commands. "стоп" stays everywhere.
+  if (!wake && c != STOP && !owns_music()) {
+    LOGI("voice command '%s' ignored: no music on this station", word.c_str());
+    return;
+  }
   // "стоп" looks at the phase itself. Finishing the dialog first would hide speech and the run.
   LOGI("voice command '%s'%s", word.c_str(),
-       (after_wake && c != STOP) || (c == STOP && phase_ != Phase::IDLE) ? " (HA pipeline cancelled)" : "");
-  if (after_wake && c != STOP) finish_interaction();
+       (wake && c != STOP) || (c == STOP && phase_ != Phase::IDLE) ? " (HA pipeline cancelled)" : "");
+  if (wake && c != STOP && phase_ != Phase::IDLE) finish_interaction();
   switch (c) {
     case STOP: {
       // Full stop: the word must not become the assistant's request, and playback must not resume.

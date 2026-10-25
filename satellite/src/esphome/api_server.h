@@ -102,7 +102,6 @@ enum class SwitchId : uint32_t {
   AUTO_UPDATE = 3,
   NEAREST_ANSWERS = 4,
   VOICE_INDICATION = 5,
-  QUICK_COMMANDS = 6,
 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };

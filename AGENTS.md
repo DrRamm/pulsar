@@ -196,13 +196,15 @@ From `/system/vendor/quasar/libyandex_evil.so`:
   needs `VQE_OMNI_WITH_GAIN` (9); the command model (`spotter_models/command`, single channel)
   only works with `VQE_OMNI` (6). Measured with `ww_offline`; re-measure when changing it.
 - The command spotter (`spotter_models/command`) hears stock words with no wake word ("тише",
-  "громче", "стоп", "продолжи", …). Switch "Quick commands" (`quick_commands=`, default 1) feeds
-  it whenever the microphone is open, including silence and pause. Off, it runs only while
-  something plays, during TTS/announcements/timer ring, for 2.5 s after the wake word, or while
-  a dialog is open, so a conversation does not trip it and "стоп" still ends that dialog instead
-  of becoming the request. "Алиса, громче" in the 2.5 s window still works with the switch off.
-  "стоп" / "хватит" stop the dialog, speech, announcements, the timer ring and playback (music
-  and Sendspin); "пауза" only pauses.
+  "громче", "стоп", "продолжи", …). It listens in silence, pause and playback, as on stock. From
+  the wake word until the dialog is IDLE again it listens only for 2.5 s after the wake word
+  (`update_commands`), so the request's speech is not heard as commands and "стоп" ends the dialog
+  instead of becoming the request. "Алиса, громче" in that window still works. Without the wake
+  word, transport and volume commands act only on a station with music of its own
+  (`owns_music()`: playing, paused or streaming): every station that hears the word would
+  otherwise act on it. There is no arbitration for them. "стоп" / "хватит" stop the dialog,
+  speech, announcements, the timer ring and playback (music and Sendspin) on every station; "пауза"
+  only pauses.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
@@ -390,9 +392,13 @@ media playback, LED animations.
 - Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
   replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
   `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
-  HA 2026.9 stays "responding" after TTS_START until AnnounceFinished (`release_tts`): sent once
-  when the answer ends or is cut short, and before the next `voice_request_start` (a late one
-  would force idle over the new listening state).
+  HA stays "responding" after TTS_START until AnnounceFinished (`release_tts`; HA has had this
+  since 2024.12, pulsar only started sending it with the fix): sent once when the answer ends or is
+  cut short, and before the next `voice_request_start` (a late one would force idle over the new
+  listening state). Only an assist announcement (`assist_announcing_`) reports its own end; a
+  media_player announcement that cut the answer short does not hold the answer's report back. The
+  report owed for an answer is dropped when the voice link is lost: it belongs to the client that
+  started the answer, and the next subscriber could have an announcement waiting.
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes

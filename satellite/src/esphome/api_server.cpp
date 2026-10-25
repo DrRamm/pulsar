@@ -131,7 +131,6 @@ enum Key : uint32_t {
   K_SELECT_CASE_COLOR = 29,
   K_ACTION_LED_SHOW = 30,
   K_SELECT_CLOCK_MUSIC = 31,
-  K_SW_QUICK_COMMANDS = 32,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -368,8 +367,7 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, sw_quick_commands,
-      bs_hw_mute;
+  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, bs_hw_mute;
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll, led_speed;
@@ -1356,13 +1354,6 @@ struct ApiServer::Impl {
     }
     {
       pb::Writer w;
-      entity_head(w, "quick_commands", K_SW_QUICK_COMMANDS, "Quick commands");
-      w.str(5, "mdi:account-voice");
-      w.u32(8, ENTITY_CATEGORY_CONFIG);
-      send_msg(c, LIST_SWITCH, w);
-    }
-    {
-      pb::Writer w;
       entity_head(w, "led_speed", K_NUMBER_LED_SPEED, "LED speed");
       w.str(5, "mdi:speedometer");
       w.flt(6, kLedSpeedMin);
@@ -1594,7 +1585,6 @@ struct ApiServer::Impl {
     send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
     send_switch(K_SW_NEAREST_ANSWERS, sw_nearest_answers, c);
     send_switch(K_SW_VOICE_INDICATION, sw_voice_indication, c);
-    send_switch(K_SW_QUICK_COMMANDS, sw_quick_commands, c);
     send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
     send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
@@ -1705,8 +1695,6 @@ struct ApiServer::Impl {
       hooks.on_switch(SwitchId::NEAREST_ANSWERS, state);
     else if (key == K_SW_VOICE_INDICATION)
       hooks.on_switch(SwitchId::VOICE_INDICATION, state);
-    else if (key == K_SW_QUICK_COMMANDS)
-      hooks.on_switch(SwitchId::QUICK_COMMANDS, state);
   }
 
   void on_number_cmd(pb::Reader &r) {
@@ -1981,7 +1969,6 @@ void ApiServer::publish_switch(SwitchId id, bool state) {
     case SwitchId::AUTO_UPDATE: s = &impl_->sw_auto_update; key = K_SW_AUTO_UPDATE; break;
     case SwitchId::NEAREST_ANSWERS: s = &impl_->sw_nearest_answers; key = K_SW_NEAREST_ANSWERS; break;
     case SwitchId::VOICE_INDICATION: s = &impl_->sw_voice_indication; key = K_SW_VOICE_INDICATION; break;
-    case SwitchId::QUICK_COMMANDS: s = &impl_->sw_quick_commands; key = K_SW_QUICK_COMMANDS; break;
   }
   if (!s) return;
   s->has = true;
