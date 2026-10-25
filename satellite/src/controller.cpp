@@ -101,6 +101,7 @@ bool Settings::load(const std::string &path) {
     else if (k == "clock_music") clock_music = v;
     else if (k == "led_speed") led_speed = std::isfinite(fv) ? std::clamp(fv, 0.25f, 4.f) : 1.f;
     else if (k == "voice_indication") voice_indication = v == "1";
+    else if (k == "quick_commands") quick_commands = v == "1";
     else if (k == "led_case_color") led_case_color = v;
   }
   const auto &styles = Leds::music_styles();
@@ -127,6 +128,7 @@ void Settings::save(const std::string &path) const {
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
       << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\nmusic_viz=" << music_viz
       << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication
+      << "\nquick_commands=" << quick_commands
       << "\nled_case_color=" << led_case_color << "\nclock_music=" << clock_music << "\n";
   }
   rename(tmp.c_str(), path.c_str());
@@ -348,6 +350,7 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
   api_->publish_switch(SwitchId::NEAREST_ANSWERS, st_.nearest_answers);
   api_->publish_switch(SwitchId::VOICE_INDICATION, st_.voice_indication);
+  api_->publish_switch(SwitchId::QUICK_COMMANDS, st_.quick_commands);
   publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
@@ -1097,6 +1100,9 @@ void Controller::on_switch(SwitchId id, bool state) {
     st_.voice_indication = state;
     leds_.set_voice_indication(state);
     clock_.set_voice_indication(state);
+  } else if (id == SwitchId::QUICK_COMMANDS) {
+    st_.quick_commands = state;
+    update_commands();
   }
   api_->publish_switch(id, state);
   persist();
@@ -1348,14 +1354,15 @@ void Controller::on_active_wake_words(const std::vector<std::string> &ids) {
   persist();
 }
 
-// Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше", "назад"):
-// active without the wake word while something plays, and right after the wake word.
+// Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше", "назад").
+// "Quick commands" feeds it whenever the mic is open, including silence and pause (as on stock).
+// Off: only while something plays, and for 2.5 s after the wake word ("Алиса, громче").
 void Controller::update_commands() {
   bool playing = player_.state(Channel::MUSIC) == PlayState::PLAYING || (sendspin_ && sendspin_->streaming()) ||
                  announcing_ || timer_ringing_ || phase_ == Phase::SPEAKING;
   bool after_wake =
       (phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs) || arbitrating_;
-  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (playing || after_wake));
+  mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (st_.quick_commands || playing || after_wake));
 }
 
 bool Controller::music_pause() {
