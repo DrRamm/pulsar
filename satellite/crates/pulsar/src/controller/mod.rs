@@ -723,8 +723,14 @@ impl Controller {
         match ev {
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
-                if ch == Channel::Music && s == PlayState::Paused {
-                    self.music_paused_ms = Some(now_ms());
+                if ch == Channel::Music {
+                    match s {
+                        PlayState::Paused => self.music_paused_ms = Some(now_ms()),
+                        // HA media took the speaker: an ended Sendspin stream is not this
+                        // station's music any more, whichever of the two events came first.
+                        PlayState::Loading | PlayState::Playing => self.sendspin_ended_ms = None,
+                        _ => {}
+                    }
                 }
                 self.publish_media();
             }

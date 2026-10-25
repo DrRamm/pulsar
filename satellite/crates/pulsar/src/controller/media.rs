@@ -189,7 +189,7 @@ impl Controller {
                     self.player.stop(Channel::Music);
                 }
                 // The HA media channel playing here took the speaker over (yield_to_local): not a
-                // pause in Music Assistant, its stream is no longer this station's music.
+                // pause in Music Assistant. on_player clears the stamp if its state comes later.
                 let taken_over = matches!(
                     self.player.state(Channel::Music),
                     PlayState::Playing | PlayState::Loading
