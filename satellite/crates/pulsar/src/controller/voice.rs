@@ -94,10 +94,13 @@ impl Controller {
     /// No more events come for the current run, and a stop would reach whichever client
     /// subscribes next. A dialog still listening or thinking ends now. An answer already playing
     /// is fetched over HTTP independently of the API link, so it plays out (still ducked) and its
-    /// end closes the dialog; a stream that dies with HA ends it through the player instead.
+    /// end closes the dialog; a stream that dies with HA ends it through the player instead. The
+    /// AnnounceFinished owed for the answer belongs to the lost client: the next one could be
+    /// waiting for an announcement, which that message would end.
     pub(super) fn voice_link_lost(&mut self) {
         self.run.reset();
         self.continue_conversation = false;
+        self.tts_report_owed = false;
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
             self.finish_interaction();
         }
@@ -233,6 +236,9 @@ impl Controller {
         if earcon {
             self.player.play(Channel::Announce, vec![SND_WAKE.into()]);
         }
+        // HA applies AnnounceFinished by forcing idle: an answer's report must not arrive over
+        // the new dialog's listening state.
+        self.send_tts_report(false);
         // A failed send comes back as VoiceStartFailed / VoiceAudioOverflow of this run.
         self.voice_run = self.api.voice_request_start(phrase);
         // HA drops audio queued before the start and queues what follows it on the same
@@ -264,7 +270,12 @@ impl Controller {
             return;
         }
         if self.phase == Phase::Idle {
-            // The run of a dialog that already ended; it is being stopped.
+            // The run of a dialog that already ended; it is being stopped. A TTS_START that got
+            // out before the stop still leaves HA waiting for the answer's report.
+            if ev == VaEvent::TtsStart {
+                self.tts_report_owed = true;
+                self.send_tts_report(false);
+            }
             debug!("voice event {code}: dialog already ended, ignored");
             return;
         }
@@ -292,6 +303,7 @@ impl Controller {
             VaEvent::IntentEnd => {
                 self.continue_conversation = get("continue_conversation") == "1";
             }
+            VaEvent::TtsStart => self.tts_report_owed = true,
             VaEvent::TtsEnd => {
                 if !get("url").is_empty() {
                     self.tts_url = get("url").to_owned();
@@ -342,12 +354,30 @@ impl Controller {
 
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
+        self.send_tts_report(ok);
         if ok && self.continue_conversation && !self.timer_ringing && !self.mic_muted() {
             self.continue_conversation = false;
             self.start_pipeline("", false, Vec::new());
             return;
         }
         self.finish_interaction();
+    }
+
+    /// Sends the AnnounceFinished owed since the run's TTS_START, at most once. Dropped while an
+    /// assist announcement's completion is pending (also when cut short): its own
+    /// AnnounceFinished ends HA's wait as well, and one more would end the announcement's wait
+    /// early. Media player announcements send none.
+    fn send_tts_report(&mut self, ok: bool) {
+        if !std::mem::take(&mut self.tts_report_owed)
+            || self
+                .pending
+                .values()
+                .any(|p| matches!(p, Pending::Announce { .. }))
+        {
+            return;
+        }
+        info!("pipeline: answer finished reported to HA (ok={ok})");
+        self.api.voice_answer_finished(ok);
     }
 
     pub(super) fn finish_interaction(&mut self) {
@@ -358,6 +388,7 @@ impl Controller {
             self.stop_sent = true;
         }
         self.run.awaiting_run_start = false;
+        self.send_tts_report(false);
         self.mic.set_streaming(self.arbitrating);
         self.phase = Phase::Idle;
         self.dialog += 1;

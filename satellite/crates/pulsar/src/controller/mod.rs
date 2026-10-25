@@ -185,6 +185,9 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
+    /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
+    tts_report_owed: bool,
     continue_conversation: bool,
     /// An HA announcement (assist or media player) plays on ANNOUNCE.
     announcing: bool,
@@ -557,6 +560,7 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            tts_report_owed: false,
             continue_conversation: false,
             announcing: false,
             ducked: false,

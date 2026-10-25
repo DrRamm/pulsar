@@ -404,6 +404,15 @@ B,G,R bytes).
 - Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
   replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
   `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
+- HA's assist satellite stays "responding" from a run's TTS_START until AnnounceFinished, also
+  when nothing plays (`send_tts_report`): sent once when the answer ends or is cut short, for a
+  TTS_START that arrives after the dialog ended, and always before the next
+  `voice_request_start` (HA applies it by forcing idle). Dropped while an assist announcement's
+  completion is pending (its own AnnounceFinished ends the wait; one more would end the
+  announcement's wait early); media player announcements send none. It belongs to the voice
+  owner's run: dropped when the link is lost, and the server drops one sent after an owner change
+  until the next `voice_request_start` (`voice_answer_finished`, like stop and audio), since the
+  next subscriber could be waiting for an announcement.
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
