@@ -14,8 +14,8 @@ use pulsar_media::PlayState;
 /// within this window; the HA pipeline is then cancelled.
 pub const COMMAND_AFTER_WAKE_MS: i64 = 2500;
 
-/// Music this station paused itself, or whose Sendspin stream ended (pause or stop in Music
-/// Assistant), stays its own this long: without the wake word "продолжи" and the volume words
+/// Music paused on this station, or whose Sendspin stream ended (pause or stop in Music
+/// Assistant), stays its own this long: without the wake word the transport and volume words
 /// still act on it.
 pub const PAUSED_MUSIC_MS: i64 = 2 * 60 * 60 * 1000;
 

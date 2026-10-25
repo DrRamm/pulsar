@@ -188,7 +188,13 @@ impl Controller {
                 if active && self.player.state(Channel::Music) != PlayState::Idle {
                     self.player.stop(Channel::Music);
                 }
-                self.sendspin_ended_ms = if active { None } else { Some(now_ms()) };
+                // The HA media channel playing here took the speaker over (yield_to_local): not a
+                // pause in Music Assistant, its stream is no longer this station's music.
+                let taken_over = matches!(
+                    self.player.state(Channel::Music),
+                    PlayState::Playing | PlayState::Loading
+                );
+                self.sendspin_ended_ms = (!active && !taken_over).then(now_ms);
                 self.publish_media();
             }
             SendspinEvent::Volume(v) => self.set_volume(v, false),

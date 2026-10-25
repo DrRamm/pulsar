@@ -171,7 +171,7 @@ impl Controller {
                 best.level_db,
                 self.arb_level
             );
-            // The command spotter of a playing station would still act on "Алиса, громче".
+            // Its command spotter would still act on "Алиса, громче" if it sounds or owns music.
             self.commands_blocked_until_ms = now_ms() + COMMAND_AFTER_WAKE_MS;
             self.update_commands();
             self.update_ui();
@@ -700,7 +700,7 @@ impl Controller {
         let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
         let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
         if !logic::command_allowed(c, held || after_wake, sounding, self.owns_music()) {
-            info!("voice command '{word}' ignored: not for this station (no own music or sound)");
+            info!("voice command '{word}' ignored: not for this station");
             return;
         }
         info!(

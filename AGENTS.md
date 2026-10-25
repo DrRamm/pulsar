@@ -453,7 +453,7 @@ B,G,R bytes).
   speaker-reference analysis, which only runs while the visualization is shown.
 - Sendspin: `pulsar-sendspin` releases the sink at once on a stream end but reports the end 1 s
   late unless the group state says "stopped", so a server that restarts the stream on seek / skip
-  does not flap the HA media state, the command spotter and the music displays.
+  does not flap the HA media state and the music displays.
 - deCONZ server limits (`pulsar-zigbee/src/deconz.rs`): a client with more than 64 KB of unread
   replies is disconnected; an APS request gets FAILURE at ≥ 8 pending confirms or > 16 frames
   queued on the link; at most 4 reads of 1024 bytes per wake-up; accepting pauses 500 ms on
