@@ -63,7 +63,7 @@ constexpr unsigned kPlayFlags = (1u << 1) | (1u << 4);
 // starts out buffering and reports 100 % only once it holds that much input (estimated from the
 // input rate), the whole response, or 2 MB. HA's streamed TTS arrives at about the speaking rate,
 // so the default held each answer back by about 2 s; local files (earcons) have no queue2.
-constexpr int64_t kAnnounceBufferNs = 500'000'000;
+constexpr int64_t kAnnounceBufferNs = 150'000'000;
 // MUSIC retries of an http(s) uri after a network failure (1, 2, 4 s apart), and the playtime
 // after which a failure counts as a new outage rather than as another retry of the same one.
 constexpr int kMaxRetries = 3;
