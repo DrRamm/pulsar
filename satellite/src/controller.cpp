@@ -303,6 +303,8 @@ bool Controller::start() {
 
   mic_.on_wake([this](const std::string &phrase, float level_db, std::vector<int16_t> preroll) {
     on_wake(phrase, level_db, std::move(preroll));
+    // A wake word that starts no dialog or arbitration must not leave the audio flowing.
+    if (phase_ != Phase::LISTENING && !arbitrating_) mic_.set_streaming(false);
   });
   mic_.on_command([this](const std::string &word) { on_command(word); });
   mic_.on_audio([this](const int16_t *pcm, size_t n) {

@@ -48,7 +48,11 @@ class AudioFrontend {
   // Command spotter on/off (commands without the wake word).
   void set_commands(bool on) { commands_.store(on); }
   // While on, cleaned 16 kHz audio is delivered via on_audio().
-  void set_streaming(bool on) { stream_.store(on); }
+  // Any call also ends the hold that a wake word puts on streaming (see run()).
+  void set_streaming(bool on) {
+    stream_.store(on);
+    wake_hold_.store(false);
+  }
   // While on, music features of the speaker reference are delivered via on_music().
   void set_music_analysis(bool on) { music_.store(on); }
 
@@ -71,6 +75,7 @@ class AudioFrontend {
   std::atomic<bool> detect_{true};
   std::atomic<bool> commands_{false};
   std::atomic<bool> stream_{false};
+  std::atomic<bool> wake_hold_{false};  // set by a wake word until the controller sets streaming
   std::atomic<bool> music_{false};
   std::mutex model_mu_;
   std::string pending_model_;

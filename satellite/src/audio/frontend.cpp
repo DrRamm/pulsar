@@ -435,7 +435,7 @@ void AudioFrontend::run() {
         pre_hist[pre_pos++ % kPrerollChunks] = *chunk;
       }
     }
-    if (chunk && stream_.load() && audio_cb_)
+    if (chunk && (stream_.load() || wake_hold_.load()) && audio_cb_)
       loop_.post([this, chunk] {
         if (audio_cb_) audio_cb_(chunk->data(), chunk->size());
       });
@@ -449,6 +449,9 @@ void AudioFrontend::run() {
           const auto &c = pre_hist[(pre_pos + i) % kPrerollChunks];  // oldest first
           pre.insert(pre.end(), c.begin(), c.end());
         }
+        // Frames after the detection go to the controller right behind the pre-roll, even though it
+        // switches streaming on only when it handles the wake word.
+        wake_hold_.store(true);
         for (auto &phrase : phrases)
           loop_.post([this, phrase, level, pre] {
             if (wake_cb_) wake_cb_(phrase, level, pre);
