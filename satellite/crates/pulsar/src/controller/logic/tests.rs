@@ -320,6 +320,32 @@ fn ducking() {
 }
 
 #[test]
+fn volume_click_gating() {
+    let click =
+        |before, after, phase| want_volume_click(before, after, phase, false, false, false, false);
+    let step = ((0.15, false), (0.1, false));
+    // Outside the microphone's STT window and with ANNOUNCE free.
+    for phase in [Phase::Idle, Phase::Processing] {
+        assert!(click(step.0, step.1, phase), "{phase:?}");
+    }
+    // LISTENING streams to STT (and plays the wake earcon), SPEAKING plays the answer.
+    for phase in [Phase::Listening, Phase::Speaking] {
+        assert!(!click(step.0, step.1, phase), "{phase:?}");
+    }
+    // A held key at the top or bottom; f32 5 % steps down end at 7.45e-9 before 0.
+    assert!(!click((1.0, false), (1.0, false), Phase::Idle));
+    assert!(!click((7.45e-9, false), (0.0, false), Phase::Idle));
+    // A key at 0 while muted unmutes: that is a change.
+    assert!(click((0.0, true), (0.0, false), Phase::Idle));
+    // Arbitrating, announcement, timer ring, closing earcon.
+    let (b, a, idle) = (step.0, step.1, Phase::Idle);
+    assert!(!want_volume_click(b, a, idle, true, false, false, false));
+    assert!(!want_volume_click(b, a, idle, false, true, false, false));
+    assert!(!want_volume_click(b, a, idle, false, false, true, false));
+    assert!(!want_volume_click(b, a, idle, false, false, false, true));
+}
+
+#[test]
 fn idle_and_auto_update() {
     let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, z);
     assert!(idle(

@@ -315,6 +315,30 @@ pub fn want_duck(
     phase != Phase::Idle || announcing || timer_ringing || closing_earcon
 }
 
+/// A local volume change clicks on ANNOUNCE, which also carries the answer, announcements, the
+/// timer ring, closing earcons and the wake earcon: a new play() there cuts whatever plays. In
+/// LISTENING and while arbitrating the microphone audio goes to HA's speech-to-text. A level
+/// that stayed put (held key at 0 or 1) does not click; levels compare in whole percent, since
+/// f32 5 % steps down from 0.15..0.3 end at 7.45e-9, one step short of 0. `before` / `after`:
+/// (volume, muted).
+pub fn want_volume_click(
+    before: (f32, bool),
+    after: (f32, bool),
+    phase: Phase,
+    arbitrating: bool,
+    announcing: bool,
+    timer_ringing: bool,
+    closing_earcon: bool,
+) -> bool {
+    let percent = |v: f32| (v * 100.0).round() as i32;
+    (percent(before.0), before.1) != (percent(after.0), after.1)
+        && matches!(phase, Phase::Idle | Phase::Processing)
+        && !arbitrating
+        && !announcing
+        && !timer_ringing
+        && !closing_earcon
+}
+
 /// Restarting cuts off whatever plays: automatic installs wait for silence.
 pub fn idle_for_update(
     phase: Phase,
