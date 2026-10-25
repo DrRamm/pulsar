@@ -14,6 +14,11 @@ use pulsar_media::PlayState;
 /// within this window; the HA pipeline is then cancelled.
 pub const COMMAND_AFTER_WAKE_MS: i64 = 2500;
 
+/// Music paused on this station, or whose Sendspin stream ended (pause or stop in Music
+/// Assistant), stays its own this long: without the wake word the transport and volume words
+/// still act on it.
+pub const PAUSED_MUSIC_MS: i64 = 2 * 60 * 60 * 1000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Idle,
@@ -232,21 +237,56 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
-/// Within the window after the wake word that opened this LISTENING phase.
+/// Within the window after the wake word that opened this dialog: HA may end the speech of a
+/// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
 pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
-    phase == Phase::Listening && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
+    matches!(phase, Phase::Listening | Phase::Processing)
+        && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
 }
 
-/// The command spotter runs without the wake word while something plays (music, Sendspin,
-/// announcement, timer ring, answer), right after the wake word and while arbitrating; never
-/// while a microphone is muted.
-pub fn commands_enabled(
-    mic_muted: bool,
-    playing: bool,
-    after_wake: bool,
-    arbitrating: bool,
+/// The command spotter listens whenever a microphone is open, except during a dialog
+/// (LISTENING / PROCESSING): there only in the window after the wake word ("Алиса, громче"), so
+/// the request's own words do not act as commands. Stock maind stops it at the wake word and
+/// starts it again once Alice is IDLE; the window is pulsar's. Arbitration runs in IDLE /
+/// SPEAKING (on_wake ignores the wake word in a dialog).
+pub fn commands_enabled(mic_muted: bool, phase: Phase, after_wake: bool) -> bool {
+    !mic_muted && (!matches!(phase, Phase::Listening | Phase::Processing) || after_wake)
+}
+
+/// Music of this station: playing or loading on the HA media channel or as a Sendspin stream, or
+/// paused / ended less than PAUSED_MUSIC_MS ago (Sendspin: its server still connected).
+/// `*_since`: when the media channel paused / the Sendspin stream ended; None = not since start.
+pub fn owns_music(
+    now: i64,
+    music: PlayState,
+    music_paused_since: Option<i64>,
+    sendspin_streaming: bool,
+    sendspin_connected: bool,
+    sendspin_ended_since: Option<i64>,
 ) -> bool {
-    !mic_muted && (playing || after_wake || arbitrating)
+    let recent = |t: Option<i64>| t.is_some_and(|t| now - t < PAUSED_MUSIC_MS);
+    matches!(music, PlayState::Playing | PlayState::Loading)
+        || (music == PlayState::Paused && recent(music_paused_since))
+        || sendspin_streaming
+        || (sendspin_connected && recent(sendspin_ended_since))
+}
+
+/// Command words have no arbitration between stations: every station that hears one acts on it.
+/// Without the wake word a station takes "стоп" (it stops only what it plays itself), the volume
+/// words while it sounds (answer, announcement, timer ring) or owns music, and transport only for
+/// its own music. After the wake word (the dialog's window, or a word held through an arbitration
+/// this station won) every command goes.
+pub fn command_allowed(c: VoiceCommand, wake: bool, sounding: bool, owns_music: bool) -> bool {
+    if wake {
+        return true;
+    }
+    match c {
+        VoiceCommand::Stop => true,
+        VoiceCommand::Louder | VoiceCommand::Quieter => sounding || owns_music,
+        VoiceCommand::Pause | VoiceCommand::Resume | VoiceCommand::Next | VoiceCommand::Prev => {
+            owns_music
+        }
+    }
 }
 
 /// HA media player state. ANNOUNCING only for HA announcements, not for earcons, timer alarms or

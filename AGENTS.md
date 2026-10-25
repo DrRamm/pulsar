@@ -202,8 +202,21 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - Spotter type → VQE output: type 0 = main channel. The wake model (`spotter_models/activation/alisa`)
   needs `VQE_OMNI_WITH_GAIN` (9); the command model (`spotter_models/command`, single channel)
   only works with `VQE_OMNI` (6). Measured with `ww_offline`; re-measure when changing it.
-- The command spotter only runs while something plays, during TTS/announcements/timer ring, or
-  2.5 s after the wake word (as `maind` does), to avoid false positives from conversation.
+- The command spotter listens whenever a microphone is open except during a dialog: in LISTENING /
+  PROCESSING only for the 2.5 s after the wake word ("Алиса, громче"; `logic::commands_enabled`),
+  so the request's own words do not act as commands. Stock maind does the same around the dialog
+  (Midi 0.351: `stopCommandSpotter reason: external` at the wake word, `startCommandSpotter …
+  reason: aliceStateChanged` back in IDLE with nothing playing); the 2.5 s window is pulsar's
+  (stock leaves "Алиса, громче" to the cloud). Command words have no arbitration between
+  stations, so without the wake word a station acts only on what is its own
+  (`logic::command_allowed`): "стоп" / "хватит" everywhere, volume while it sounds (answer,
+  announcement, timer ring) or owns music, pause / resume / next / previous only for its own music
+  (`logic::owns_music`: playing or loading locally or over Sendspin, or paused / Sendspin stream
+  ended less than 2 h ago with the server still connected). A command word recognised before a
+  won arbitration ends is held and leaves the answer playing (no dialog starts); spoken "Алиса,
+  тише" during an answer can be recognised after it (seen on a Midi: 53 ms), when the barge-in has
+  already cut the answer: it then acts in the new dialog's window and cancels that dialog's HA
+  pipeline.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
@@ -442,7 +455,7 @@ B,G,R bytes).
   speaker-reference analysis, which only runs while the visualization is shown.
 - Sendspin: `pulsar-sendspin` releases the sink at once on a stream end but reports the end 1 s
   late unless the group state says "stopped", so a server that restarts the stream on seek / skip
-  does not flap the HA media state, the command spotter and the music displays.
+  does not flap the HA media state and the music displays.
 - deCONZ server limits (`pulsar-zigbee/src/deconz.rs`): a client with more than 64 KB of unread
   replies is disconnected; an APS request gets FAILURE at ≥ 8 pending confirms or > 16 frames
   queued on the link; at most 4 reads of 1024 bytes per wake-up; accepting pauses 500 ms on

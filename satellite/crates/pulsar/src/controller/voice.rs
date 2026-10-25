@@ -171,7 +171,7 @@ impl Controller {
                 best.level_db,
                 self.arb_level
             );
-            // The command spotter of a playing station would still act on "Алиса, громче".
+            // Its command spotter would still act on "Алиса, громче" if it sounds or owns music.
             self.commands_blocked_until_ms = now_ms() + COMMAND_AFTER_WAKE_MS;
             self.update_commands();
             self.update_ui();
@@ -183,7 +183,7 @@ impl Controller {
             self.mic.set_streaming(false);
             self.update_commands();
             self.update_ui();
-            return self.on_command(&command);
+            return self.on_command(&command, true);
         }
         // Capture keeps streaming into the new dialog: switching it off here could drop the
         // chunk between the preroll and live audio.
@@ -256,6 +256,7 @@ impl Controller {
         self.mic.set_streaming(self.arbitrating);
         if self.phase == Phase::Listening {
             self.phase = Phase::Processing;
+            self.update_commands();
         }
     }
 
@@ -399,6 +400,7 @@ impl Controller {
         self.arm_watchdog();
         if self.error_shown {
             self.error_shown = false;
+            self.update_commands(); // the ui, which also does it, waits for the error ring
             self.timers.set(Tk::UiAfterError, 1200);
         } else {
             self.update_ui();
@@ -627,21 +629,26 @@ impl Controller {
     // ---------------- local commands ----------------
 
     /// Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше",
-    /// "назад"): active without the wake word while something plays, and right after the wake
-    /// word.
+    /// "назад"): on unless muted or in a dialog past the window after its wake word
+    /// (logic::commands_enabled).
     pub(super) fn update_commands(&self) {
-        let playing = self.player.state(Channel::Music) == PlayState::Playing
-            || self.sendspin_streaming()
-            || self.announcing
-            || self.timer_ringing
-            || self.phase == Phase::Speaking;
         let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
         self.mic.set_commands(logic::commands_enabled(
             self.mic_muted(),
-            playing,
+            self.phase,
             after_wake,
-            self.arbitrating,
         ));
+    }
+
+    fn owns_music(&self) -> bool {
+        logic::owns_music(
+            now_ms(),
+            self.player.state(Channel::Music),
+            self.music_paused_ms,
+            self.sendspin_streaming(),
+            self.sendspin.as_ref().is_some_and(|ss| ss.connected()),
+            self.sendspin_ended_ms,
+        )
     }
 
     /// True when something was playing. Reads the player and Sendspin states before the
@@ -672,7 +679,9 @@ impl Controller {
         }
     }
 
-    pub(super) fn on_command(&mut self, word: &str) {
+    /// `held`: the word came during a wake arbitration this station won, right after its wake
+    /// word.
+    pub(super) fn on_command(&mut self, word: &str, held: bool) {
         if self.mic_muted() {
             return;
         }
@@ -689,14 +698,23 @@ impl Controller {
             return;
         }
         let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
+        let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
+        if !logic::command_allowed(c, held || after_wake, sounding, self.owns_music()) {
+            info!("voice command '{word}' ignored: not for this station");
+            return;
+        }
         info!(
             "voice command '{word}'{}",
             if after_wake {
                 " (after wake word, HA pipeline cancelled)"
+            } else if held {
+                " (after wake word)"
             } else {
                 ""
             }
         );
+        // Only a word in the dialog's own window cancels it: one held through an arbitration in
+        // SPEAKING / IDLE leaves the answer playing.
         if after_wake {
             self.finish_interaction();
         }
