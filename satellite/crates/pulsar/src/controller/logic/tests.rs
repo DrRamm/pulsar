@@ -187,11 +187,13 @@ fn command_words() {
 
 #[test]
 fn command_gating() {
-    // The window after the wake word: 2.5 s of LISTENING.
+    // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
     assert!(after_wake(Phase::Listening, 12_499, 10_000));
     assert!(!after_wake(Phase::Listening, 12_500, 10_000));
-    assert!(!after_wake(Phase::Processing, 10_001, 10_000));
+    assert!(after_wake(Phase::Processing, 12_499, 10_000));
+    assert!(!after_wake(Phase::Processing, 12_500, 10_000));
     assert!(!after_wake(Phase::Idle, 10_001, 10_000));
+    assert!(!after_wake(Phase::Speaking, 10_001, 10_000));
     // Everywhere but in a dialog past its window.
     for phase in [Phase::Idle, Phase::Speaking] {
         assert!(commands_enabled(false, phase, false), "{phase:?}");
