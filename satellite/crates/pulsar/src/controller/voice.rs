@@ -12,8 +12,7 @@ use pulsar_sendspin::Transport;
 
 use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
 use super::{
-    Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SND_CANCEL, SND_TIMER, SND_WAKE,
-    SOUNDS, TIMER_RING_MAX_MS, Tk,
+    Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
 
 impl Controller {
@@ -229,7 +228,8 @@ impl Controller {
         self.continue_conversation = false;
         self.update_duck();
         if earcon {
-            self.player.play(Channel::Announce, vec![SND_WAKE.into()]);
+            let sound = format!("{SOUNDS}{}", self.model.wake_sound);
+            self.player.play(Channel::Announce, vec![sound]);
         }
         // HA applies AnnounceFinished by forcing idle: an answer's report must not arrive over
         // the new dialog's listening state.
@@ -459,7 +459,7 @@ impl Controller {
     /// the window after the wake word. An announcement playing over the dialog goes with it.
     fn cancel_dialog(&mut self) {
         self.interrupt_speech();
-        self.play_closing_earcon(SND_CANCEL.into());
+        self.play_closing_earcon(format!("{SOUNDS}{}", self.model.cancel_sound));
         self.finish_interaction();
     }
 
@@ -605,7 +605,8 @@ impl Controller {
             self.ring_yielded = true;
             return;
         }
-        self.play_announce(vec![SND_TIMER.into()], Pending::Ring);
+        let sound = format!("{SOUNDS}{}", self.model.timer_sound);
+        self.play_announce(vec![sound], Pending::Ring);
     }
 
     fn resume_ring(&mut self) {
