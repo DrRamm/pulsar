@@ -350,7 +350,7 @@ carried over).
 | Light sensor | `ltr308als01` (iio) | same |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned |
-| Earcons | `common/spotter_*.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
+| Earcons | `common/spotter_*.mp3`, `timer.wav`, `common/volume_sound.mp3` (volume buttons and «громче»/«тише»; not when HA sets the level, and not over TTS, an announcement, the timer ring or a closing earcon), `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
 | Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none |
 
