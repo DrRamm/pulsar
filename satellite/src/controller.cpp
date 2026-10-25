@@ -27,6 +27,7 @@ constexpr const char *kSounds = "/system/vendor/quasar/sounds/";
 const std::string kSndWake = std::string(kSounds) + "common/spotter_start.mp3";
 const std::string kSndCancel = std::string(kSounds) + "common/spotter_cancel.mp3";
 const std::string kSndTimer = std::string(kSounds) + "common/timer.wav";
+const std::string kSndVolume = std::string(kSounds) + "common/volume_sound.mp3";
 constexpr float kDuckGain = 0.15f;
 constexpr int64_t kTimerRingMaxMs = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -926,6 +927,10 @@ void Controller::set_volume(float v, bool feedback) {
   if (feedback) {
     leds_.show_volume(st_.volume);
     clock_.flash_number(int(st_.volume * 100 + 0.5f));
+    // Stock click on the shared ANNOUNCE channel. TTS, announcements, the timer ring and the
+    // closing earcon use that channel; a new play() would cut them. Music is not ducked for it.
+    if (phase_ != Phase::SPEAKING && !announcing_ && !timer_ringing_ && !closing_earcon_)
+      player_.play(Channel::ANNOUNCE, {kSndVolume});
   }
   if (sendspin_) sendspin_->report_volume(st_.volume, st_.muted);
   publish_media();
