@@ -1,7 +1,7 @@
 //! Volume, mute, ducking, the HA media player and the Sendspin hooks (controller.cpp "media").
 
 use log::debug;
-use pulsar_core::ClockShot;
+use pulsar_core::{ClockShot, now_ms};
 use pulsar_esphome::{MediaCommand, MediaCommandRequest};
 use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::SendspinEvent;
@@ -80,7 +80,6 @@ impl Controller {
     /// Reads the player state as it is now: right after a command to the player it is still the
     /// previous one (as in C++); the change comes as `PlayerEvent::State`, which publishes again.
     pub(super) fn publish_media(&self) {
-        self.update_commands(); // command spotter follows playback state
         let s = logic::media_state(
             self.announcing,
             self.player.state(Channel::Music),
@@ -189,6 +188,7 @@ impl Controller {
                 if active && self.player.state(Channel::Music) != PlayState::Idle {
                     self.player.stop(Channel::Music);
                 }
+                self.sendspin_ended_ms = if active { None } else { Some(now_ms()) };
                 self.publish_media();
             }
             SendspinEvent::Volume(v) => self.set_volume(v, false),

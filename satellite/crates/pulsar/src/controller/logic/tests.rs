@@ -192,11 +192,94 @@ fn command_gating() {
     assert!(!after_wake(Phase::Listening, 12_500, 10_000));
     assert!(!after_wake(Phase::Processing, 10_001, 10_000));
     assert!(!after_wake(Phase::Idle, 10_001, 10_000));
-    assert!(!commands_enabled(false, false, false, false));
-    assert!(commands_enabled(false, true, false, false));
-    assert!(commands_enabled(false, false, true, false));
-    assert!(commands_enabled(false, false, false, true));
-    assert!(!commands_enabled(true, true, true, true));
+    // Everywhere but in a dialog past its window.
+    for phase in [Phase::Idle, Phase::Speaking] {
+        assert!(commands_enabled(false, phase, false), "{phase:?}");
+    }
+    for phase in [Phase::Listening, Phase::Processing] {
+        assert!(!commands_enabled(false, phase, false), "{phase:?}");
+    }
+    assert!(commands_enabled(false, Phase::Listening, true));
+    for phase in [
+        Phase::Idle,
+        Phase::Listening,
+        Phase::Processing,
+        Phase::Speaking,
+    ] {
+        assert!(!commands_enabled(true, phase, true), "{phase:?}");
+    }
+}
+
+#[test]
+fn music_ownership() {
+    use PlayState as P;
+    let now = 10 * PAUSED_MUSIC_MS;
+    let own = |m, paused, ss, conn, ended| owns_music(now, m, paused, ss, conn, ended);
+    assert!(own(P::Playing, None, false, false, None));
+    assert!(own(P::Loading, None, false, false, None));
+    assert!(own(P::Idle, None, true, true, None));
+    assert!(!own(P::Idle, None, false, true, None));
+    // Paused / ended music stays this station's for PAUSED_MUSIC_MS.
+    assert!(own(
+        P::Paused,
+        Some(now - PAUSED_MUSIC_MS + 1),
+        false,
+        false,
+        None
+    ));
+    assert!(!own(
+        P::Paused,
+        Some(now - PAUSED_MUSIC_MS),
+        false,
+        false,
+        None
+    ));
+    assert!(!own(P::Paused, None, false, false, None));
+    assert!(own(
+        P::Idle,
+        None,
+        false,
+        true,
+        Some(now - PAUSED_MUSIC_MS + 1)
+    ));
+    assert!(!own(
+        P::Idle,
+        None,
+        false,
+        true,
+        Some(now - PAUSED_MUSIC_MS)
+    ));
+    // An ended Sendspin stream counts only while its server is connected.
+    assert!(!own(P::Idle, None, false, false, Some(now - 1000)));
+    // A pause time does not make a stopped player's music its own.
+    assert!(!own(P::Idle, Some(now - 1000), false, false, None));
+}
+
+#[test]
+fn command_permission() {
+    use VoiceCommand::*;
+    for c in [Stop, Pause, Resume, Louder, Quieter, Next, Prev] {
+        assert!(
+            command_allowed(c, true, false, false),
+            "{c:?} after the wake word"
+        );
+        assert!(
+            command_allowed(c, false, false, true),
+            "{c:?} with own music"
+        );
+        // Silent, no music of its own: only "стоп".
+        assert_eq!(
+            command_allowed(c, false, false, false),
+            c == Stop,
+            "{c:?} silent"
+        );
+        // Answer / announcement / ring, no music: "стоп" and volume.
+        assert_eq!(
+            command_allowed(c, false, true, false),
+            matches!(c, Stop | Louder | Quieter),
+            "{c:?} sounding"
+        );
+    }
 }
 
 #[test]
