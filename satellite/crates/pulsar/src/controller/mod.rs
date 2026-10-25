@@ -36,6 +36,9 @@ const SOUNDS: &str = "/system/vendor/quasar/sounds/";
 const SND_WAKE: &str = "/system/vendor/quasar/sounds/common/spotter_start.mp3";
 const SND_CANCEL: &str = "/system/vendor/quasar/sounds/common/spotter_cancel.mp3";
 const SND_TIMER: &str = "/system/vendor/quasar/sounds/common/timer.wav";
+// maind plays it (sound 45, SimpleVolumeTonePlayer) for every change except those from its muted
+// sources "other" (app / remote) and "smart_tts" (smart volume); keys and voice words click.
+const SND_VOLUME: &str = "/system/vendor/quasar/sounds/common/volume_sound.mp3";
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice

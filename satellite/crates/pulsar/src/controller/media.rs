@@ -7,7 +7,7 @@ use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::SendspinEvent;
 
 use super::logic::{self, cxx_max, cxx_min};
-use super::{Controller, DUCK_GAIN, Pending};
+use super::{Controller, DUCK_GAIN, Pending, SND_VOLUME};
 
 impl Controller {
     pub(super) fn update_duck(&mut self) {
@@ -56,6 +56,7 @@ impl Controller {
     /// `feedback`: a local change (buttons, voice), shown on the ring and the clock; it also
     /// unmutes.
     pub(super) fn set_volume(&mut self, v: f32, feedback: bool) {
+        let before = (self.st.volume, self.st.muted);
         self.st.volume = cxx_min(1.0, cxx_max(0.0, v));
         self.mixer.set_volume(self.st.volume);
         if self.st.muted && feedback {
@@ -69,12 +70,30 @@ impl Controller {
             // armhf, checked in the -O2 asm of Controller::set_volume); the rounding follows it.
             self.clock
                 .flash_number(self.st.volume.mul_add(100.0, 0.5) as i32);
+            self.volume_click(before);
         }
         if let Some(ss) = &self.sendspin {
             ss.report_volume(self.st.volume, self.st.muted);
         }
         self.publish_media();
         self.persist();
+    }
+
+    /// Stock click after a local change (keys, voice words); `before` = (volume, muted) before it.
+    fn volume_click(&self, before: (f32, bool)) {
+        if !logic::want_volume_click(
+            before,
+            (self.st.volume, self.st.muted),
+            self.phase,
+            self.arbitrating,
+            self.announcing,
+            self.timer_ringing,
+            self.closing_earcon,
+        ) {
+            return;
+        }
+        // Music is not ducked under it; its Done has no Pending entry and is ignored.
+        self.player.play(Channel::Announce, vec![SND_VOLUME.into()]);
     }
 
     /// Reads the player state as it is now: right after a command to the player it is still the

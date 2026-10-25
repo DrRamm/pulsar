@@ -350,7 +350,7 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 | Light sensor | `ltr308als01` (iio) | same |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned |
-| Earcons | `common/spotter_*.mp3`, `timer.wav`, `common/volume_sound.mp3` (volume buttons and «громче»/«тише»; not when HA sets the level, and not over TTS, an announcement, the timer ring or a closing earcon), `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
+| Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
 | Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none |
 
@@ -429,7 +429,12 @@ B,G,R bytes).
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
-  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains.
+  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains. Local
+  changes (keys, voice words) play `common/volume_sound.mp3` on ANNOUNCE (maind's
+  SimpleVolumeTonePlayer: every change except its sources "other" and "smart_tts") when the level
+  (in whole percent) or mute changed, outside LISTENING / SPEAKING and arbitration and never over
+  an announcement, the timer ring or a closing earcon (`logic::want_volume_click`); HA and
+  Sendspin changes are silent; music is not ducked under it.
 - Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
   the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
   the wake level as the mean of the 8 loudest of the last 47 `VQE_OMNI` frames (post-AEC, no AGC;
