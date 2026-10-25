@@ -42,6 +42,7 @@ constexpr unsigned kEventsStopMask = (1u << 0) | (1u << 4) | (1u << 7) | (1u << 
 // Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models), long
 // enough to cover the phrase when the spotter confirms; the loudest frames are the phrase itself.
 constexpr size_t kLevelChunks = 47;
+constexpr size_t kPrerollChunks = 16;  // 16 x 32 ms
 constexpr size_t kLevelTop = 8;
 
 // Rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be the same
@@ -370,6 +371,8 @@ void AudioFrontend::run() {
   std::vector<float> mics(period * nmic), spk(period * nspk);
   std::array<float, kLevelChunks> level_hist{};  // mean square per VQE frame
   size_t level_pos = 0;
+  std::array<std::vector<int16_t>, kPrerollChunks> pre_hist;  // cleaned audio per VQE frame, ring
+  size_t pre_pos = 0;
   SpectrumAnalyzer ana(model_.capture_rate, period);
   if (!ana.ok()) LOGW("music analysis: unsupported capture layout");
   bool music_was_on = false;
@@ -419,28 +422,36 @@ void AudioFrontend::run() {
       }
     }
 
-    if (stream_.load() && audio_cb_) {
+    std::shared_ptr<std::vector<int16_t>> chunk;
+    {
       const float *d = nullptr;
       size_t n = 0;
       if (e.vqe_check(e.vqe_out(e.vqe, VQE_OMNI_WITH_GAIN, 0, &d, &n), "VQE output") && n) {
-        auto chunk = std::make_shared<std::vector<int16_t>>(n);
+        chunk = std::make_shared<std::vector<int16_t>>(n);
         for (size_t i = 0; i < n; i++) {
           float v = d[i] * 32768.f;
           (*chunk)[i] = (int16_t)(v > 32767.f ? 32767 : v < -32768.f ? -32768 : std::lrint(v));
         }
-        loop_.post([this, chunk] {
-          if (audio_cb_) audio_cb_(chunk->data(), chunk->size());
-        });
+        pre_hist[pre_pos++ % kPrerollChunks] = *chunk;
       }
     }
+    if (chunk && stream_.load() && audio_cb_)
+      loop_.post([this, chunk] {
+        if (audio_cb_) audio_cb_(chunk->data(), chunk->size());
+      });
 
     if (detect_.load()) {
       auto phrases = e.feed(e.wake);
       if (!phrases.empty()) {
         float level = wake_level_db(level_hist);
+        std::vector<int16_t> pre;
+        for (size_t i = 0; i < kPrerollChunks; i++) {
+          const auto &c = pre_hist[(pre_pos + i) % kPrerollChunks];  // oldest first
+          pre.insert(pre.end(), c.begin(), c.end());
+        }
         for (auto &phrase : phrases)
-          loop_.post([this, phrase, level] {
-            if (wake_cb_) wake_cb_(phrase, level);
+          loop_.post([this, phrase, level, pre] {
+            if (wake_cb_) wake_cb_(phrase, level, pre);
           });
       }
     }

@@ -26,7 +26,9 @@ class AudioFrontend {
  public:
   // level_db: wake word level in dBFS on VQE_OMNI (after echo cancellation, before AGC), rounded to
   // 0.1 dB; -100 = no data.
-  using WakeCb = std::function<void(const std::string &phrase, float level_db)>;
+  // preroll: the last ~0.5 s of cleaned 16 kHz audio up to the detection, so that a command spoken
+  // right after the wake word is not cut off.
+  using WakeCb = std::function<void(const std::string &phrase, float level_db, std::vector<int16_t> preroll)>;
   using CommandCb = std::function<void(const std::string &word)>;
   using AudioCb = std::function<void(const int16_t *pcm, size_t samples)>;  // 16 kHz mono
   using MusicCb = std::function<void(const MusicFrame &f)>;  // one per VQE chunk (32 ms)

@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "arbiter.h"
 #include "audio/frontend.h"
@@ -85,7 +86,7 @@ class Controller : public ApiHooks {
  private:
   enum class Phase { IDLE, LISTENING, PROCESSING, SPEAKING };
 
-  void on_wake(const std::string &phrase, float level_db);
+  void on_wake(const std::string &phrase, float level_db, std::vector<int16_t> preroll);
   void answer_wake(const std::string &phrase, std::vector<int16_t> preroll);
   void arbitration_done(bool won, const WakeArbiter::Claim &best, size_t peers);
   void cancel_arbitration();

@@ -301,7 +301,9 @@ bool Controller::start() {
     });
   }
 
-  mic_.on_wake([this](const std::string &phrase, float level_db) { on_wake(phrase, level_db); });
+  mic_.on_wake([this](const std::string &phrase, float level_db, std::vector<int16_t> preroll) {
+    on_wake(phrase, level_db, std::move(preroll));
+  });
   mic_.on_command([this](const std::string &word) { on_command(word); });
   mic_.on_audio([this](const int16_t *pcm, size_t n) {
     if (phase_ == Phase::LISTENING)
@@ -402,7 +404,7 @@ void Controller::on_time(uint32_t epoch, const std::string &tz) {
 
 void Controller::update_detection() { mic_.set_detection(!st_.mic_muted && !hw_mic_muted_); }
 
-void Controller::on_wake(const std::string &phrase, float level_db) {
+void Controller::on_wake(const std::string &phrase, float level_db, std::vector<int16_t> preroll) {
   if (st_.mic_muted || hw_mic_muted_) return;
   LOGI("wake word '%s', level %.1f dB", phrase.c_str(), level_db);
   if (timer_ringing_) {  // the wake word works as a stop word while ringing
@@ -413,12 +415,12 @@ void Controller::on_wake(const std::string &phrase, float level_db) {
   }
   if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING || arbitrating_) return;
   // Without the HA pipeline this station could win and stay silent: it does not take part.
-  if (!arbitration_on() || !api_->voice_subscribed()) return answer_wake(phrase, {});
+  if (!arbitration_on() || !api_->voice_subscribed()) return answer_wake(phrase, std::move(preroll));
   arbitrating_ = true;
   commands_blocked_until_ms_ = 0;  // a station that lost the previous wake word may win this one
   arb_phrase_ = phrase;
   arb_level_ = level_db;
-  arb_audio_.clear();
+  arb_audio_ = std::move(preroll);  // the speech that began before the detection came through
   arb_command_.clear();
   mic_.set_streaming(true);
   update_commands();
