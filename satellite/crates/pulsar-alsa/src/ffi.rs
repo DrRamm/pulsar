@@ -46,6 +46,8 @@ pub(crate) struct Lib {
     pcm_open: unsafe extern "C" fn(*mut *mut Pcm, *const c_char, c_int, c_int) -> c_int,
     pcm_close: unsafe extern "C" fn(*mut Pcm) -> c_int,
     pcm_prepare: unsafe extern "C" fn(*mut Pcm) -> c_int,
+    pcm_start: unsafe extern "C" fn(*mut Pcm) -> c_int,
+    pcm_state: unsafe extern "C" fn(*mut Pcm) -> c_int,
     pcm_drop: unsafe extern "C" fn(*mut Pcm) -> c_int,
     pcm_resume: unsafe extern "C" fn(*mut Pcm) -> c_int,
     pcm_readi: unsafe extern "C" fn(*mut Pcm, *mut c_void, Uframes) -> Sframes,
@@ -150,6 +152,8 @@ pub(crate) fn load_from(soname: &str) -> Result<Lib, String> {
             pcm_open: sym(&lib, c"snd_pcm_open")?,
             pcm_close: sym(&lib, c"snd_pcm_close")?,
             pcm_prepare: sym(&lib, c"snd_pcm_prepare")?,
+            pcm_start: sym(&lib, c"snd_pcm_start")?,
+            pcm_state: sym(&lib, c"snd_pcm_state")?,
             pcm_drop: sym(&lib, c"snd_pcm_drop")?,
             pcm_resume: sym(&lib, c"snd_pcm_resume")?,
             pcm_readi: sym(&lib, c"snd_pcm_readi")?,
@@ -501,6 +505,16 @@ impl RawPcm {
     pub(crate) fn prepare(&mut self) -> i32 {
         // SAFETY: see impl comment.
         unsafe { (self.lib.pcm_prepare)(self.pcm.as_ptr()) }
+    }
+
+    pub(crate) fn start(&mut self) -> i32 {
+        // SAFETY: see impl comment.
+        unsafe { (self.lib.pcm_start)(self.pcm.as_ptr()) }
+    }
+
+    pub(crate) fn state(&mut self) -> i32 {
+        // SAFETY: see impl comment.
+        unsafe { (self.lib.pcm_state)(self.pcm.as_ptr()) }
     }
 
     pub(crate) fn drop_frames(&mut self) -> i32 {

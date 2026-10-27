@@ -28,6 +28,7 @@ impl Controller {
             }
             ApiEvent::VoiceSubscribed(s) => self.on_voice_subscribed(s),
             ApiEvent::VoiceEvent { event, data } => self.on_voice_event(event, &data),
+            ApiEvent::TtsAudio(pcm) => self.on_tts_audio(pcm),
             ApiEvent::Announce(req) => self.on_announce(req),
             ApiEvent::Timer(t) => self.on_timer_event(t),
             ApiEvent::ActiveWakeWords(ids) => self.on_active_wake_words(ids),

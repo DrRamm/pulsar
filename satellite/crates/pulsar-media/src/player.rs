@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::ffi::{CString, c_void};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
@@ -20,6 +20,9 @@ use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::gst::{self, Api, Call, MainLoop, Pipeline};
+
+#[path = "pcm_out.rs"]
+mod pcm_out;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Channel {
@@ -100,9 +103,11 @@ pub enum PlayerEvent {
 const PLAY_FLAGS: u32 = (1 << 1) | (1 << 4);
 // ANNOUNCE network queue (playbin "buffer-duration" -> queue2 max-size-time, default 2 s). queue2
 // starts out buffering and reports 100 % only once it holds that much input (estimated from the
-// input rate), the whole response, or 2 MB. HA's streamed TTS arrives at about the speaking rate,
-// so the default held each answer back by about 2 s; local files (earcons) have no queue2.
-const ANNOUNCE_BUFFER_NS: i64 = 500_000_000;
+// input rate), the whole response, or 2 MB. Pipeline TTS no longer comes this way (it is raw PCM);
+// what remains is a proxied announcement, which is usually the whole file at once. 100 ms covers a
+// trickle without holding a finished file (queue2 reports 100 % as soon as the response ends).
+// Local files (earcons) have no queue2.
+const ANNOUNCE_BUFFER_NS: i64 = 100_000_000;
 // MUSIC retries of an http(s) uri after a network failure (1, 2, 4 s apart), and the playtime
 // after which a failure counts as a new outage rather than as another retry of the same one.
 const MAX_RETRIES: u32 = 3;
@@ -267,13 +272,20 @@ pub(crate) trait Backend: Send {
     fn element(&self, ch: Channel) -> *const c_void;
 }
 
-/// State shared by the handle (runtime thread) and the GLib thread.
+/// State shared by the handle (runtime thread), the GLib thread and the PCM thread.
 pub(crate) struct Shared {
-    /// PlayState per channel; written by the GLib thread only, before the State event.
+    /// PlayState per channel, written before the State event.
     states: [AtomicU8; 2],
     /// Per channel: the play() whose Done is still owed.
     pending: Mutex<[Option<PlayId>; 2]>,
     events: UnboundedSender<PlayerEvent>,
+    /// play_pcm id that owns the channel's reported state; 0 = GStreamer or idle.
+    pcm_live: AtomicU64,
+    pcm_channel: AtomicU8,
+    /// Bumped by play() / stop() / play_pcm() so a PCM state posted late is dropped.
+    audio_epoch: [AtomicU64; 2],
+    /// ANNOUNCE gain as f32 bits. Raw TTS does not go through the playbin volume; mute writes 0.
+    announce_gain: AtomicU32,
 }
 
 impl Shared {
@@ -282,6 +294,50 @@ impl Shared {
             states: [AtomicU8::new(0), AtomicU8::new(0)],
             pending: Mutex::new([None, None]),
             events,
+            pcm_live: AtomicU64::new(0),
+            pcm_channel: AtomicU8::new(0),
+            audio_epoch: [AtomicU64::new(0), AtomicU64::new(0)],
+            announce_gain: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
+
+    fn set_state(&self, ch: Channel, s: PlayState) {
+        let prev = PlayState::from_u8(self.states[ch.index()].swap(s as u8, Ordering::Relaxed));
+        if prev == s {
+            return;
+        }
+        debug!("player: ch{} {} -> {}", ch.index(), prev.name(), s.name());
+        self.send(PlayerEvent::State(ch, s));
+    }
+
+    fn bump_audio(&self, ch: Channel) -> u64 {
+        self.audio_epoch[ch.index()].fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn pending_id(&self, ch: Channel) -> Option<PlayId> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)[ch.index()]
+    }
+
+    /// Raw PCM owns the reported state until it ends or another play() / stop() claims it.
+    fn pcm_owns(&self, ch: Channel) -> bool {
+        self.pcm_live.load(Ordering::Acquire) != 0
+            && self.pcm_channel.load(Ordering::Relaxed) == ch.index() as u8
+    }
+
+    fn claim_pcm(&self, ch: Channel, gid: u64) {
+        self.pcm_channel.store(ch.index() as u8, Ordering::Relaxed);
+        self.pcm_live.store(gid, Ordering::Release);
+    }
+
+    fn release_pcm(&self, ch: Channel) {
+        if self.pcm_channel.load(Ordering::Relaxed) == ch.index() as u8 {
+            self.pcm_live.store(0, Ordering::Release);
+        }
+    }
+
+    fn clear_pcm_if(&self, gid: u64) {
+        if self.pcm_live.load(Ordering::Acquire) == gid {
+            self.pcm_live.store(0, Ordering::Release);
         }
     }
 
@@ -379,13 +435,7 @@ impl Machine {
     }
 
     fn set_state(&mut self, ch: Channel, s: PlayState) {
-        let prev =
-            PlayState::from_u8(self.shared.states[ch.index()].swap(s as u8, Ordering::Relaxed));
-        if prev == s {
-            return;
-        }
-        debug!("player: ch{} {} -> {}", ch.index(), prev.name(), s.name());
-        self.shared.send(PlayerEvent::State(ch, s));
+        self.shared.set_state(ch, s);
     }
 
     fn loading_or_paused(&self, ch: Channel) -> PlayState {
@@ -410,6 +460,10 @@ impl Machine {
         c.active = false;
         c.buffering = false;
         c.urls.clear();
+        // Raw PCM owns the reported state until it ends or another play()/stop() claims it.
+        if self.shared.pcm_owns(ch) {
+            return;
+        }
         if failed {
             self.set_state(ch, PlayState::Error);
         }
@@ -666,6 +720,8 @@ impl Machine {
 
     fn stop(&mut self, ch: Channel) {
         if !self.chans[ch.index()].active {
+            // PCM playback has no url list. Already Idle is silent (the tests rely on that).
+            self.set_state(ch, PlayState::Idle);
             return;
         }
         info!("player: ch{} stop", ch.index());
@@ -884,6 +940,8 @@ struct Inner {
     next_id: Cell<u64>,
     /// None: degraded (init failed), every play() is Done(false) at once.
     exec: Option<Box<dyn Exec>>,
+    /// None with `exec`: the host has no firmware GStreamer, so there is no PCM thread either.
+    pcm: Option<pcm_out::Worker>,
 }
 
 /// Player commands; the GLib thread stops when the last clone is dropped.
@@ -902,17 +960,42 @@ pub fn spawn(pcm: &str) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     if exec.is_none() {
         error!("player init failed");
     }
-    (PlayerHandle::new(shared, exec), rx)
+    // The PCM thread shares the process with GStreamer; without it there is no `speakers` mix.
+    let pcm = exec
+        .as_ref()
+        .and_then(|_| pcm_out::Worker::spawn(Arc::clone(&shared)));
+    (PlayerHandle::new(shared, exec, pcm), rx)
 }
 
 impl PlayerHandle {
-    fn new(shared: Arc<Shared>, exec: Option<Box<dyn Exec>>) -> PlayerHandle {
+    fn new(
+        shared: Arc<Shared>,
+        exec: Option<Box<dyn Exec>>,
+        pcm: Option<pcm_out::Worker>,
+    ) -> PlayerHandle {
         PlayerHandle {
             inner: Rc::new(Inner {
                 shared,
                 next_id: Cell::new(1),
                 exec,
+                pcm,
             }),
+        }
+    }
+
+    fn fresh_id(&self) -> PlayId {
+        let id = PlayId(self.inner.next_id.get());
+        self.inner.next_id.set(id.0 + 1);
+        id
+    }
+
+    fn abort_pcm(&self, ch: Channel) {
+        // A Music play/stop must not post Abort: the worker treats any Abort at the queue head
+        // as an interrupt, which would cut an Announce drain short and skip its Done.
+        let owns = self.inner.shared.pcm_owns(ch);
+        self.inner.shared.release_pcm(ch);
+        if owns && let Some(pcm) = &self.inner.pcm {
+            pcm.abort(ch);
         }
     }
 
@@ -929,14 +1012,64 @@ impl PlayerHandle {
     /// (3 times, 1/2/4 s apart, resuming at the position reached) before moving on; local files
     /// and ANNOUNCE fail at once.
     pub fn play(&self, ch: Channel, urls: Vec<String>) -> PlayId {
-        let id = PlayId(self.inner.next_id.get());
-        self.inner.next_id.set(id.0 + 1);
+        let id = self.fresh_id();
         self.inner.shared.supersede(ch, Some(id));
+        self.inner.shared.bump_audio(ch);
+        self.abort_pcm(ch);
         if self.inner.exec.is_none() {
             self.inner.shared.complete(ch, id, false);
         }
         self.invoke(move |m| m.play(ch, id, urls));
         id
+    }
+
+    /// Raw S16LE instead of a url list. `push_pcm` feeds the stream, `end_pcm` plays out what
+    /// arrived. `stop` and `play` cut it short the same way they cut a url list.
+    pub fn play_pcm(&self, ch: Channel, rate: i32, channels: i32) -> PlayId {
+        let id = self.fresh_id();
+        self.inner.shared.supersede(ch, Some(id));
+        let epoch = self.inner.shared.bump_audio(ch);
+        let ok = self.inner.exec.is_some()
+            && self.inner.pcm.is_some()
+            && rate > 0
+            && (1..=2).contains(&channels);
+        if !ok {
+            self.inner.shared.complete(ch, id, false);
+            return id;
+        }
+        self.inner.shared.claim_pcm(ch, id.0);
+        if let Some(pcm) = &self.inner.pcm {
+            pcm.start(ch, id.0, epoch, rate, channels);
+        }
+        // Stop a url that was playing here. The PCM stream owns the state, so halt leaves it.
+        self.invoke(move |m| {
+            m.cancel_retry(ch);
+            m.halt(ch, false);
+        });
+        id
+    }
+
+    pub fn push_pcm(&self, ch: Channel, samples: &[i16]) {
+        let Some(pcm) = &self.inner.pcm else {
+            return;
+        };
+        if samples.is_empty() {
+            return;
+        }
+        let Some(id) = self.inner.shared.pending_id(ch) else {
+            return;
+        };
+        pcm.push(ch, id.0, samples.to_vec());
+    }
+
+    pub fn end_pcm(&self, ch: Channel) {
+        let Some(pcm) = &self.inner.pcm else {
+            return;
+        };
+        let Some(id) = self.inner.shared.pending_id(ch) else {
+            return;
+        };
+        pcm.end(ch, id.0);
     }
 
     pub fn pause(&self, ch: Channel) {
@@ -949,6 +1082,8 @@ impl PlayerHandle {
 
     pub fn stop(&self, ch: Channel) {
         self.inner.shared.supersede(ch, None);
+        self.inner.shared.bump_audio(ch);
+        self.abort_pcm(ch);
         self.invoke(move |m| m.stop(ch));
     }
 
@@ -961,6 +1096,12 @@ impl PlayerHandle {
     /// Per-channel gain 0..1 (ducking MUSIC while listening / speaking), ramped while playing.
     pub fn set_channel_gain(&self, ch: Channel, gain: f32) {
         let gain = clamp_gain(gain);
+        if ch == Channel::Announce {
+            self.inner
+                .shared
+                .announce_gain
+                .store((gain as f32).to_bits(), Ordering::Relaxed);
+        }
         self.invoke(move |m| m.set_gain(ch, gain));
     }
 }
@@ -1209,7 +1350,7 @@ mod tests {
                 Arc::clone(&shared),
             )));
             let queue = Rc::new(RefCell::new(VecDeque::new()));
-            let h = PlayerHandle::new(shared, Some(Box::new(QueueExec(Rc::clone(&queue)))));
+            let h = PlayerHandle::new(shared, Some(Box::new(QueueExec(Rc::clone(&queue)))), None);
             Rig { h, rx, queue, fake }
         }
 
@@ -1713,6 +1854,15 @@ mod tests {
         assert!(vols.windows(2).all(|w| w[1] < w[0]));
         assert_eq!(*vols.last().unwrap(), f64::from(0.08f32));
         assert!(r.timers().is_empty());
+    }
+
+    #[test]
+    fn play_pcm_without_a_thread_fails_at_once() {
+        let mut r = Rig::new();
+        let id = r.h.play_pcm(Announce, 16_000, 1);
+        assert_eq!(r.events(), [Done { id, ok: false }]);
+        let bad = r.h.play_pcm(Announce, 0, 1);
+        assert_eq!(r.events(), [Done { id: bad, ok: false }]);
     }
 
     #[test]

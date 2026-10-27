@@ -143,8 +143,9 @@ impl Server {
             }
             msg::VA_CONFIG_REQ => self.send_va_config(id),
             msg::VA_SET_CONFIG => self.on_va_set_config(r),
-            // HA -> device TTS audio over the API; SPEAKER is not advertised.
-            msg::VA_AUDIO => {}
+            // Same message the device uses for the microphone. From the pipeline owner it is
+            // TTS PCM (field data), because SPEAKER is announced.
+            msg::VA_AUDIO => self.on_tts_audio(id, r),
             _ => debug!("api: ignoring message type {msg_type} ({len} bytes)"),
         }
         true
@@ -476,6 +477,32 @@ impl Server {
         self.cache.light = st;
         if self.clients.iter().any(|c| c.hello && c.states) {
             self.send_light(None);
+        }
+    }
+
+    fn on_tts_audio(&mut self, id: u64, r: &mut Reader<'_>) {
+        if !self.client(id).is_some_and(|c| c.voice) {
+            return;
+        }
+        let mut bytes: &[u8] = &[];
+        let mut end = false;
+        while let Some(f) = r.next() {
+            match f.num {
+                1 if f.wt == WireType::Len => bytes = f.data,
+                2 => end = f.boolean(),
+                _ => {}
+            }
+        }
+        if bytes.len() >= 2 {
+            let (chunks, _) = bytes.as_chunks::<2>();
+            let pcm = chunks.iter().map(|c| i16::from_le_bytes(*c)).collect();
+            self.emit(ApiEvent::TtsAudio(pcm));
+        }
+        if end {
+            self.emit(ApiEvent::VoiceEvent {
+                event: VaEvent::TtsStreamEnd,
+                data: HashMap::new(),
+            });
         }
     }
 

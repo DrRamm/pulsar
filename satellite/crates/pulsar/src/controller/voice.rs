@@ -11,6 +11,10 @@ use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::Transport;
 
 use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
+
+/// TTS_END still carries a url. The raw stream (TTS_STREAM_START) follows on the same
+/// connection when the engine can stream; otherwise the url plays after this.
+const TTS_URL_FALLBACK_MS: u64 = 300;
 use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
@@ -29,9 +33,23 @@ impl Controller {
     /// The C++ completion callbacks of `play()`.
     pub(super) fn play_done(&mut self, p: Pending, ok: bool) {
         match p {
-            Pending::Tts { dialog } => {
+            Pending::Tts { dialog, seq } => {
+                if seq != self.tts_play_seq {
+                    return;
+                }
                 if dialog == self.dialog && self.phase == Phase::Speaking {
-                    self.tts_finished(ok);
+                    if !ok && self.tts_pcm {
+                        // A failed PCM start/write must leave the TTS URL available as fallback.
+                        self.tts_pcm = false;
+                        self.tts_played = false;
+                        if !self.tts_url.is_empty() {
+                            self.play_tts();
+                        } else {
+                            self.tts_finished(false);
+                        }
+                    } else {
+                        self.tts_finished(ok);
+                    }
                 }
                 self.resume_ring();
             }
@@ -91,15 +109,24 @@ impl Controller {
     }
 
     /// No more events come for the current run, and a stop would reach whichever client
-    /// subscribes next. A dialog still listening or thinking ends now. An answer already playing
-    /// is fetched over HTTP independently of the API link, so it plays out (still ducked) and its
-    /// end closes the dialog; a stream that dies with HA ends it through the player instead. The
-    /// AnnounceFinished owed for the answer belongs to the lost client: the next one could be
-    /// waiting for an announcement, which that message would end.
+    /// subscribes next. A dialog still listening or thinking ends now. A url answer is fetched
+    /// over HTTP independently of the API link, so it plays out (still ducked) and its end
+    /// closes the dialog. Raw TTS is paced by HA: when the link drops, only audio already
+    /// received can play. The AnnounceFinished owed for the answer belongs to the lost client:
+    /// the next one could be waiting for an announcement, which that message would end.
     pub(super) fn voice_link_lost(&mut self) {
         self.run.reset();
         self.continue_conversation = false;
+        self.timers.cancel(Tk::TtsUrl);
         self.tts_report_owed = false;
+        if self.tts_pcm && self.phase == Phase::Speaking {
+            if self.tts_pcm_samples == 0 {
+                // Nothing arrived; the callback ends the dialog. The url needs the link.
+                self.player.stop(Channel::Announce);
+            } else {
+                self.player.end_pcm(Channel::Announce);
+            }
+        }
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
             self.finish_interaction();
         }
@@ -225,6 +252,9 @@ impl Controller {
         self.listen_started_ms = now_ms();
         self.tts_url.clear();
         self.tts_played = false;
+        self.tts_pcm = false;
+        self.tts_pcm_samples = 0;
+        self.timers.cancel(Tk::TtsUrl);
         self.continue_conversation = false;
         self.update_duck();
         if earcon {
@@ -291,9 +321,9 @@ impl Controller {
                 self.update_ui();
             }
             VaEvent::IntentProgress => {
-                if get("tts_start_streaming") == "1" {
-                    self.play_tts();
-                }
+                // "tts_start_streaming" means the url is ready early. With SPEAKER announced the
+                // answer itself arrives as PCM just after TTS_END; starting the url here would
+                // play it and then be cut off by that stream.
             }
             VaEvent::IntentEnd => {
                 self.continue_conversation = get("continue_conversation") == "1";
@@ -303,7 +333,34 @@ impl Controller {
                 if !get("url").is_empty() {
                     self.tts_url = get("url").to_owned();
                 }
-                self.play_tts();
+                // RUN_END can arrive before TTS_STREAM_START (HA sends the event, then schedules
+                // the stream). Hold the dialog for the fallback window instead of playing the
+                // url at once.
+                if !self.tts_pcm
+                    && !self.tts_played
+                    && !self.tts_url.is_empty()
+                    && self.phase != Phase::Idle
+                {
+                    self.timers.cancel(Tk::TtsUrl);
+                    self.timers.set(Tk::TtsUrl, TTS_URL_FALLBACK_MS);
+                }
+            }
+            VaEvent::TtsStreamStart => self.start_tts_pcm(),
+            VaEvent::TtsStreamEnd => {
+                if self.tts_pcm {
+                    if self.tts_pcm_samples == 0
+                        && !self.tts_url.is_empty()
+                        && self.phase != Phase::Idle
+                    {
+                        self.tts_pcm = false;
+                        self.tts_played = false;
+                        self.play_tts();
+                    } else if self.tts_pcm_samples == 0 {
+                        self.player.stop(Channel::Announce);
+                    } else {
+                        self.player.end_pcm(Channel::Announce);
+                    }
+                }
             }
             VaEvent::Error => {
                 // HA accepts one wake word phrase per 2 s across satellites: another one answers.
@@ -325,7 +382,9 @@ impl Controller {
             }
             VaEvent::RunEnd => {
                 self.stop_streaming();
-                if !self.tts_played {
+                // TtsUrl: TTS_END is in, the raw stream may still start. An answer already
+                // playing ends the dialog itself.
+                if !self.tts_played && !self.tts_pcm && !self.timers.is_set(Tk::TtsUrl) {
                     self.finish_interaction();
                 }
             }
@@ -335,16 +394,68 @@ impl Controller {
         self.arm_watchdog();
     }
 
-    fn play_tts(&mut self) {
-        if self.tts_played || self.tts_url.is_empty() {
+    pub(super) fn play_tts_fallback(&mut self) {
+        if self.tts_pcm || self.tts_played {
             return;
         }
+        info!("voice: no raw tts, playing the url");
+        self.play_tts();
+    }
+
+    fn play_tts(&mut self) {
+        if self.tts_played || self.tts_url.is_empty() || self.phase == Phase::Idle {
+            return;
+        }
+        self.timers.cancel(Tk::TtsUrl);
         self.tts_played = true;
+        self.tts_pcm = false;
+        self.tts_play_seq += 1;
+        let seq = self.tts_play_seq;
         self.phase = Phase::Speaking;
         self.update_ui();
+        // A timer-driven start would otherwise leave the PROCESSING watchdog armed.
+        self.arm_watchdog();
         let url = self.tts_url.clone();
         let dialog = self.dialog;
-        self.play_announce(vec![url], Pending::Tts { dialog });
+        self.play_announce(vec![url], Pending::Tts { dialog, seq });
+    }
+
+    /// HA streams this once voice feature SPEAKER is announced: 16 kHz mono S16LE, paced to keep
+    /// about 384 ms queued on a device that starts at once. The url from TTS_END is the fallback.
+    fn start_tts_pcm(&mut self) {
+        if self.tts_pcm || self.phase == Phase::Idle {
+            return;
+        }
+        self.tts_pcm = true;
+        self.tts_pcm_samples = 0;
+        self.tts_play_seq += 1;
+        let seq = self.tts_play_seq;
+        self.phase = Phase::Speaking;
+        self.update_ui();
+        self.arm_watchdog();
+        info!("voice: raw tts 16000 Hz mono");
+        let dialog = self.dialog;
+        let id = self.player.play_pcm(Channel::Announce, 16_000, 1);
+        self.pending.insert(id, Pending::Tts { dialog, seq });
+    }
+
+    pub(super) fn on_tts_audio(&mut self, pcm: Vec<i16>) {
+        if pcm.is_empty() || self.phase == Phase::Idle {
+            return;
+        }
+        if !self.tts_pcm {
+            // A chunk with no stream yet starts playback only once the dialog is past listening.
+            // A late block from the previous answer must not pull a new wake into SPEAKING.
+            if !matches!(self.phase, Phase::Processing | Phase::Speaking) {
+                return;
+            }
+            self.start_tts_pcm();
+        }
+        if !self.tts_pcm {
+            return;
+        }
+        self.tts_pcm_samples += pcm.len();
+        self.player.push_pcm(Channel::Announce, &pcm);
     }
 
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
@@ -383,6 +494,7 @@ impl Controller {
             self.stop_sent = true;
         }
         self.run.awaiting_run_start = false;
+        self.timers.cancel(Tk::TtsUrl);
         self.send_tts_report(false);
         self.mic.set_streaming(self.arbitrating);
         self.phase = Phase::Idle;

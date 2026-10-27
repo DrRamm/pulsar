@@ -106,6 +106,9 @@ pub struct Pcm {
     frame_bytes: usize,
 }
 
+/// snd_pcm_state_t PREPARED: parameters applied, playback has not started.
+pub const PCM_STATE_PREPARED: i32 = 2;
+
 fn ok(rc: i32) -> Result<(), i32> {
     if rc < 0 { Err(rc) } else { Ok(()) }
 }
@@ -207,6 +210,16 @@ impl Pcm {
 
     pub fn prepare(&mut self) -> Result<(), i32> {
         ok(self.raw.prepare())
+    }
+
+    /// snd_pcm_start. A stream shorter than `start_threshold` stays in PREPARED until this.
+    pub fn start(&mut self) -> Result<(), i32> {
+        ok(self.raw.start())
+    }
+
+    /// snd_pcm_state. [`PCM_STATE_PREPARED`] is 2.
+    pub fn state(&mut self) -> i32 {
+        self.raw.state()
     }
 
     /// snd_pcm_drop.

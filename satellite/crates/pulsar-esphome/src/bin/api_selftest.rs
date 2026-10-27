@@ -203,7 +203,7 @@ impl Echo {
                 return false;
             }
             // The C++ harness had no handlers for these.
-            ApiEvent::Update(_) | ApiEvent::MdnsTxtChanged(_) => {}
+            ApiEvent::Update(_) | ApiEvent::MdnsTxtChanged(_) | ApiEvent::TtsAudio(_) => {}
         }
         true
     }

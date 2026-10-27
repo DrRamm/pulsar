@@ -549,6 +549,36 @@ async fn commands_are_validated_like_cxx() {
 }
 
 #[tokio::test]
+async fn pipeline_tts_audio_is_pcm_from_the_owner() {
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (_h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            p.subscribe_voice(true).await;
+            let _ = drain(&mut p, &mut rx).await;
+            let mut w = Writer::new();
+            w.bytes(1, &[0x01, 0x00, 0xfe, 0xff, 0x00], true);
+            p.send(msg::VA_AUDIO, &w).await;
+            let mut end = Writer::new();
+            end.boolean(2, true, true);
+            p.send(msg::VA_AUDIO, &end).await;
+            assert_eq!(
+                drain(&mut p, &mut rx).await,
+                [
+                    ApiEvent::TtsAudio(vec![1, -2]),
+                    ApiEvent::VoiceEvent {
+                        event: VaEvent::TtsStreamEnd,
+                        data: Default::default(),
+                    },
+                ]
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn voice_events_come_from_the_owner() {
     local()
         .run_until(async {

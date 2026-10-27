@@ -409,6 +409,8 @@ pub enum ApiEvent {
     VoiceAudioOverflow {
         run: u64,
     },
+    /// Pipeline TTS from the voice owner: 16 kHz mono S16LE (VoiceAssistantAudio data).
+    TtsAudio(Vec<i16>),
     /// Update entity: install the offered release or check for one now.
     Update(UpdateCommand),
     /// The encryption key changed: the TXT records of `_esphomelib._tcp` to advertise now.

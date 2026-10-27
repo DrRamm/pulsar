@@ -47,9 +47,10 @@ pub(super) mod key {
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
 }
 
-/// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
-/// conversation.
-pub(super) const VOICE_FEATURES: u32 = 1 | 4 | 8 | 16 | 32;
+/// aioesphomeapi VoiceAssistantFeature: voice assistant, speaker, API audio, timers, announce,
+/// start conversation. SPEAKER makes HA stream pipeline TTS as 16 kHz mono WAV over VA_AUDIO
+/// instead of a url.
+pub(super) const VOICE_FEATURES: u32 = 1 | 2 | 4 | 8 | 16 | 32;
 /// HA MediaPlayerEntityFeature: pause, volume set / mute / step, play media, stop, play,
 /// media announce.
 const MEDIA_FEATURES: u32 = 1 | 4 | 8 | 512 | 1024 | 4096 | 16384 | 1_048_576;

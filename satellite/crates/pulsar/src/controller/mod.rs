@@ -85,13 +85,16 @@ enum Tk {
     UpdateRetry,
     /// Exit after an installed update.
     UpdateExit,
+    /// TTS_END's url, played only if the raw stream never starts.
+    TtsUrl,
 }
 
 /// What a `play()` was for: the C++ completion callback and the values it captured.
 #[derive(Clone, Copy, Debug)]
 enum Pending {
-    /// Pipeline TTS of dialog `dialog`.
-    Tts { dialog: u64 },
+    /// Pipeline TTS of dialog `dialog`. `seq` is `tts_play_seq` of that play: a superseded
+    /// callback (the url replaced by PCM, or the other way around) must not end the dialog.
+    Tts { dialog: u64, seq: u64 },
     /// Error / cancel earcon number `seq`.
     Earcon { seq: u64 },
     /// HA (assist satellite) announcement number `seq`.
@@ -180,6 +183,11 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    /// This answer is the raw 16 kHz stream, not `tts_url`.
+    tts_pcm: bool,
+    tts_pcm_samples: usize,
+    /// play_tts / start_tts_pcm. A superseded callback bails out.
+    tts_play_seq: u64,
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
@@ -566,6 +574,9 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            tts_pcm: false,
+            tts_pcm_samples: 0,
+            tts_play_seq: 0,
             tts_report_owed: false,
             continue_conversation: false,
             announcing: false,
@@ -717,6 +728,7 @@ impl Controller {
             Tk::UpdateRetry => self.maybe_auto_update(),
             // exit 0: supervise.sh starts the new binary
             Tk::UpdateExit => self.exit = Some(ExitReason::Updated),
+            Tk::TtsUrl => self.play_tts_fallback(),
         }
     }
 
@@ -724,6 +736,10 @@ impl Controller {
         match ev {
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
+                if ch == Channel::Announce && s == PlayState::Playing && self.tts_pcm {
+                    self.timers.cancel(Tk::TtsUrl);
+                    self.tts_played = true;
+                }
                 if ch == Channel::Music {
                     match s {
                         PlayState::Paused => self.music_paused_ms = Some(now_ms()),
