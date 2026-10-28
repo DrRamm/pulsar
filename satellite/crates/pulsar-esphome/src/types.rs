@@ -58,8 +58,10 @@ pub struct ApiConfig {
     /// Clock music entities, no clock_show_text / clock_show_face actions, none of their states
     /// sent.
     pub has_clock: bool,
-    /// false: no Illuminance sensor, no lux states.
+    /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
+    /// Whether the ambient sensor opened and can control the clock.
+    pub has_auto_brightness: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -80,6 +82,7 @@ impl Default for ApiConfig {
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
+            has_auto_brightness: true,
             key_path: None,
         }
     }
@@ -254,6 +257,7 @@ pub enum SwitchId {
     NearestAnswers = 4,
     VoiceIndication = 5,
     WakePreroll = 6,
+    ClockAutoBrightness = 7,
 }
 
 #[repr(u32)]
