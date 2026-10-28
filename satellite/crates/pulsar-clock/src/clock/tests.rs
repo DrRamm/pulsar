@@ -567,6 +567,75 @@ async fn actor_draws_commands_and_stops_with_the_handles() {
 }
 
 #[tokio::test]
+async fn auto_brightness_off_ignores_the_light() {
+    let (m, root) = temp_model!("auto_bri", b"yandex,plum\0", "clock");
+    let segs = create_lite2(m, &root);
+    // The level of every lit segment (the Lite 2 writes the level as the segment value).
+    let levels = || -> Vec<u32> {
+        segs.iter()
+            .flatten()
+            .filter_map(|p| std::fs::read_to_string(p).unwrap().trim().parse().ok())
+            .filter(|&v| v > 0)
+            .collect()
+    };
+    // The actor writes while this task yields: wait until every lit segment shows `want`.
+    let settled = |want: u32| async move {
+        for _ in 0..200 {
+            let v = levels();
+            if !v.is_empty() && v.iter().all(|&x| x == want) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("segments never showed {want}: {:?}", levels());
+    };
+    // Wait for the actor to finish writing before clearing regular test files.
+    let quiet = || async {
+        let mut last = Vec::new();
+        let mut same = 0;
+        for _ in 0..400 {
+            let v = levels();
+            same = if !v.is_empty() && v == last {
+                same + 1
+            } else {
+                0
+            };
+            if same == 5 {
+                return;
+            }
+            last = v;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("segments kept changing: {last:?}");
+    };
+    // A sysfs write does not truncate: a shorter value over a longer one leaves digits behind.
+    // Empty the files before a write that must read back exactly.
+    let clear = || {
+        for p in segs.iter().flatten() {
+            std::fs::write(p, "").unwrap();
+        }
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let clock = spawn(m);
+            clock.set_ambient_lux(0.0);
+            clock.set_text("1234".into());
+            quiet().await;
+            clear();
+            clock.set_auto_brightness(false);
+            settled(255).await;
+            clear();
+            // Dark room, auto brightness on: 0.02 of full.
+            clock.set_auto_brightness(true);
+            settled(5).await;
+            drop(clock);
+            assert!(actors::join_all(Duration::from_secs(1)).await);
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn unavailable_clock_is_a_no_op() {
     let (m, _root) = temp_model!("none", b"yandex,plum\0", "none-");
     let local = tokio::task::LocalSet::new();

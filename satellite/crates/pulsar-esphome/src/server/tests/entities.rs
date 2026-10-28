@@ -37,6 +37,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         zigbee_modes: s(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
+        has_auto_brightness: true,
         key_path: None,
     };
     (id, cfg)
@@ -280,6 +281,11 @@ async fn commands_are_validated_like_cxx() {
             .await;
             c.send(
                 msg::SWITCH_CMD,
+                kv(key::SW_CLOCK_AUTO_BRI, |w| w.boolean(2, true, true)),
+            )
+            .await;
+            c.send(
+                msg::SWITCH_CMD,
                 kv(key::MEDIA, |w| w.boolean(2, true, true)),
             )
             .await;
@@ -293,6 +299,7 @@ async fn commands_are_validated_like_cxx() {
                     ApiEvent::Switch(SwitchId::NearestAnswers, true),
                     ApiEvent::Switch(SwitchId::VoiceIndication, false),
                     ApiEvent::Switch(SwitchId::WakePreroll, true),
+                    ApiEvent::Switch(SwitchId::ClockAutoBrightness, true),
                 ]
             );
 
@@ -677,6 +684,7 @@ async fn clock_and_lux_entities_need_the_hardware() {
             let (id, mut cfg) = selftest("now");
             cfg.has_clock = false;
             cfg.has_lux = false;
+            cfg.has_auto_brightness = false;
             let (h, mut rx, port) = start_with(id, cfg);
             let mut p = Peer::connect(port).await;
             p.hello("HA").await;
@@ -685,6 +693,7 @@ async fn clock_and_lux_entities_need_the_hardware() {
             h.publish_sensor(SensorId::Illuminance, 7.0);
             let gone = [
                 key::SW_CLOCK,
+                key::SW_CLOCK_AUTO_BRI,
                 key::SELECT_CLOCK_MUSIC,
                 key::NUMBER_CLOCK_BRI,
                 key::NUMBER_CLOCK_SCROLL,
@@ -731,6 +740,48 @@ async fn clock_and_lux_entities_need_the_hardware() {
             let got = p.sync().await;
             assert_eq!(got.len(), 1);
             assert_eq!(got[0].0, msg::NUMBER_STATE);
+            assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn clock_auto_brightness_needs_the_light_sensor() {
+    local()
+        .run_until(async {
+            // A clock whose light sensor failed to open keeps Illuminance and Clock display.
+            let (id, mut cfg) = selftest("now");
+            // Illuminance can remain listed when a built-in sensor failed to open.
+            cfg.has_lux = true;
+            cfg.has_auto_brightness = false;
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            publish_selftest_states(&h);
+            p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+            let mut keys = Vec::new();
+            loop {
+                let (t, m) = p.recv().await.unwrap();
+                if t == msg::LIST_DONE {
+                    break;
+                }
+                keys.push(field(&m, 2).unwrap().u32());
+            }
+            assert!(keys.contains(&key::SW_CLOCK));
+            assert!(keys.contains(&key::SENSOR_LUX));
+            assert!(!keys.contains(&key::SW_CLOCK_AUTO_BRI));
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            let states = p.sync().await;
+            assert!(
+                !states
+                    .iter()
+                    .any(|(_, m)| state_key(m) == Some(key::SW_CLOCK_AUTO_BRI))
+            );
+            h.publish_switch(SwitchId::ClockAutoBrightness, false);
+            h.publish_number(NumberId::LedSpeed, 2.0);
+            let got = p.sync().await;
+            assert_eq!(got.len(), 1);
             assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
         })
         .await;
