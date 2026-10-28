@@ -428,6 +428,7 @@ impl Controller {
             model_dir(&st.wake_word),
             Some(PathBuf::from(COMMAND_MODEL)),
         );
+        mic.set_preroll(st.wake_preroll);
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),
@@ -745,7 +746,15 @@ impl Controller {
 
     fn on_frontend(&mut self, ev: FrontendEvent) {
         match ev {
-            FrontendEvent::Wake { phrase, level_db } => self.on_wake(&phrase, level_db),
+            FrontendEvent::Wake {
+                phrase,
+                level_db,
+                preroll,
+            } => {
+                self.on_wake(&phrase, level_db, preroll);
+                // After on_wake has switched streaming on where the wake word starts a request.
+                self.mic.wake_handled();
+            }
             FrontendEvent::Command { word } => self.on_command(&word, false),
             FrontendEvent::Audio(pcm) => {
                 if self.phase == Phase::Listening {
