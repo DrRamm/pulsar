@@ -23,6 +23,24 @@ fn text_frame(s: &str) -> Frame {
     glyph_frame(g, colon)
 }
 
+#[test]
+fn auto_dark_hysteresis_and_pairing() {
+    assert!(auto_dark(false, 2.0));
+    assert!(auto_dark(true, 7.0));
+    assert!(!auto_dark(true, 10.0));
+    assert!(!auto_dark(false, 7.0));
+    assert!(auto_dark(false, 5.0));
+
+    let mut l = Layers::new();
+    l.auto_dark = true;
+    assert_eq!(l.compose(NOW, wall).0, Frame::default());
+    l.show_code("1234".into(), NOW);
+    assert_ne!(l.compose(NOW, wall).0, Frame::default());
+    l.code.clear();
+    l.auto_dark = false;
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
 fn bands(x: f32) -> MusicFrame {
     MusicFrame {
         bands: [x; 8],
@@ -626,9 +644,32 @@ async fn auto_brightness_off_ignores_the_light() {
             clock.set_auto_brightness(false);
             settled(255).await;
             clear();
-            // Dark room, auto brightness on: 0.02 of full.
+            // Auto brightness blanks the segments in a dark room.
             clock.set_auto_brightness(true);
-            settled(5).await;
+            let glyphs = font::text_glyphs(&font::layout_text(b"1234"), 0, 400).0;
+            let lit: Vec<_> = segs
+                .iter()
+                .enumerate()
+                .flat_map(|(d, row)| {
+                    row.iter()
+                        .enumerate()
+                        .filter(move |(s, _)| glyphs[d] & (1 << s) != 0)
+                        .map(|(_, path)| path)
+                })
+                .collect();
+            for _ in 0..200 {
+                if lit
+                    .iter()
+                    .all(|p| std::fs::read_to_string(p).unwrap().trim() == "0")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                lit.iter()
+                    .all(|p| std::fs::read_to_string(p).unwrap().trim() == "0")
+            );
             drop(clock);
             assert!(actors::join_all(Duration::from_secs(1)).await);
         })
