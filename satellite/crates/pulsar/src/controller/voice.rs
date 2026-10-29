@@ -281,6 +281,13 @@ impl Controller {
                 self.continue_conversation = false;
             }
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
+                if ev == VaEvent::SttEnd
+                    && matches!(self.phase, Phase::Listening | Phase::Processing)
+                    && logic::stt_stop(get("text"))
+                {
+                    info!("voice dialog cancelled: STT stop word");
+                    return self.cancel_dialog();
+                }
                 self.stop_streaming();
                 self.update_ui();
             }
