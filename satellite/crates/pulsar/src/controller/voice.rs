@@ -310,12 +310,18 @@ impl Controller {
                 self.continue_conversation = get("continue_conversation") == "1";
                 if self.speech_marks.is_empty() {
                     self.speech_marks = super::speech_marks::from_text(get("speech"));
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
                 }
             }
             VaEvent::TtsStart => {
                 self.tts_report_owed = true;
                 if self.speech_marks.is_empty() {
                     self.speech_marks = super::speech_marks::from_text(get("text"));
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
                 }
             }
             VaEvent::TtsEnd => {
@@ -385,6 +391,13 @@ impl Controller {
     pub(super) fn update_speech_mark(&mut self) {
         if self.speech_started_ms == 0 {
             self.clear_speech_display();
+            return;
+        }
+        if self.speech_marks.is_empty() {
+            // Streaming audio can start before INTENT_END or TTS_START supplies its text.
+            self.timers.cancel(Tk::SpeechMark);
+            self.clock.set_speech_number(String::new());
+            self.speech_latch = None;
             return;
         }
         let now = now_ms();
