@@ -54,12 +54,14 @@ fn auto_dark_hysteresis_and_pairing() {
     let mut l = Layers::new();
     l.set_speech_number("42", NOW);
     l.auto_dark = true;
+    assert_eq!(l.compose(NOW, wall).0, text_frame("42"));
+    l.set_speech_number("", NOW);
     assert_eq!(l.compose(NOW, wall).0, Frame::default());
     l.show_code("1234".into(), NOW);
     assert_ne!(l.compose(NOW, wall).0, Frame::default());
     l.code.clear();
     l.auto_dark = false;
-    assert_eq!(l.compose(NOW, wall).0, text_frame("42"));
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
 }
 
 fn bands(x: f32) -> MusicFrame {

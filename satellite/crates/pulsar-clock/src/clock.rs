@@ -30,10 +30,9 @@
 //! (`Model::clock_center`). No global current: maind dims through the per-segment brightness
 //! value (0..255), and so do we.
 //!
-//! Content, first active wins: pairing code > volume number > spoken number > voice state
-//! (TIMER_RING always, LISTENING / THINKING / SPEAKING with voice indication on) > update install
-//! (dark) > one-shot > timer countdown > temporary layer > Text / Face > music levels > time.
-//! Disabled: dark, except pairing.
+//! Content, first active wins: pairing code > volume number > timer ring > spoken number > voice
+//! state > update install (dark) > one-shot > timer countdown > temporary layer > Text / Face >
+//! music levels > time. Auto-dark leaves transient numbers visible; manual off allows pairing only.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -457,11 +456,11 @@ impl Layers {
             let g = font::code_glyphs(self.code.as_bytes(), now - self.code_since, CODE_PAGE_MS);
             return (glyph_frame(g, false), 0);
         }
-        if self.enabled && !self.auto_dark && now < self.flash_until {
+        if self.enabled && now < self.flash_until {
             let g = font::number_glyphs(self.flash_value);
             return (glyph_frame(g, false), self.flash_until - now);
         }
-        if !self.enabled || self.auto_dark {
+        if !self.enabled {
             return (Frame::default(), 0);
         }
         // Timer ringing always wins over spoken numbers.
@@ -480,6 +479,9 @@ impl Layers {
                 step - (now - number.since()) % step
             };
             return (glyph_frame(g, colon), next);
+        }
+        if self.auto_dark {
+            return (Frame::default(), 0);
         }
         let frame_step = |t0: i64| FX_FRAME_MS - (now - t0) % FX_FRAME_MS;
         if let Some(v) = self.voice {

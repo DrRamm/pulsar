@@ -115,26 +115,117 @@ pub(super) fn positioned(index: usize, value: &str) -> String {
     }
 }
 
-/// Approximate display schedule when HA sends TTS_START text but no timed marks.
-/// Each written number gets a minimum three-second slot from playback start.
+fn word(token: &str) -> String {
+    token
+        .trim_matches(|c: char| !c.is_alphabetic())
+        .to_lowercase()
+        .replace('ё', "е")
+}
+
+fn unit(token: &str) -> Option<i32> {
+    Some(match word(token).as_str() {
+        "ноль" | "нуля" => 0,
+        "один" | "одна" | "одно" | "одного" | "одной" => 1,
+        "два" | "две" | "двух" => 2,
+        "три" | "трех" => 3,
+        "четыре" | "четырех" => 4,
+        "пять" | "пяти" => 5,
+        "шесть" | "шести" => 6,
+        "семь" | "семи" => 7,
+        "восемь" | "восьми" => 8,
+        "девять" | "девяти" => 9,
+        "десять" | "десяти" => 10,
+        "одиннадцать" | "одиннадцати" => 11,
+        "двенадцать" | "двенадцати" => 12,
+        "тринадцать" | "тринадцати" => 13,
+        "четырнадцать" | "четырнадцати" => 14,
+        "пятнадцать" | "пятнадцати" => 15,
+        "шестнадцать" | "шестнадцати" => 16,
+        "семнадцать" | "семнадцати" => 17,
+        "восемнадцать" | "восемнадцати" => 18,
+        "девятнадцать" | "девятнадцати" => 19,
+        _ => return None,
+    })
+}
+
+fn tens(token: &str) -> Option<i32> {
+    Some(match word(token).as_str() {
+        "двадцать" | "двадцати" => 20,
+        "тридцать" | "тридцати" => 30,
+        "сорок" | "сорока" => 40,
+        "пятьдесят" | "пятидесяти" => 50,
+        "шестьдесят" | "шестидесяти" => 60,
+        "семьдесят" | "семидесяти" => 70,
+        "восемьдесят" | "восьмидесяти" => 80,
+        "девяносто" | "девяноста" => 90,
+        _ => return None,
+    })
+}
+
+fn literal(token: &str) -> Option<String> {
+    let value = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
+    if value.is_empty()
+        || value.len() > 32
+        || !value.bytes().any(|b| b.is_ascii_digit())
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b"-:.,".contains(&b))
+    {
+        return None;
+    }
+    Some(value.replace(',', "."))
+}
+
+/// Approximate display schedule when HA sends response text but no timed marks.
+/// Digits and common Russian cardinal words get a minimum three-second slot.
 pub(super) fn from_text(input: &str) -> Vec<SpeechMark> {
     let mut marks = Vec::new();
-    for token in input.split(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | ':' | '.' | ',')))
-    {
-        if token.is_empty() || !token.bytes().any(|b| b.is_ascii_digit()) {
-            continue;
+    let tokens: Vec<_> = input.split_whitespace().collect();
+    let mut i = 0;
+    let mut negative = false;
+    while i < tokens.len() && marks.len() < 100 {
+        match word(tokens[i]).as_str() {
+            "минус" => {
+                negative = true;
+                i += 1;
+                continue;
+            }
+            "плюс" => {
+                negative = false;
+                i += 1;
+                continue;
+            }
+            _ => {}
         }
-        // split() keeps decimals and times; punctuation at the edges is not part of a number.
-        let value = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '-');
-        if value.is_empty() || value.len() > 32 || marks.len() >= 100 {
+        let (value, consumed) = if let Some(t) = tens(tokens[i]) {
+            let next = tokens.get(i + 1).and_then(|s| unit(s));
+            if let Some(u @ 1..=9) = next {
+                ((t + u).to_string(), 2)
+            } else {
+                (t.to_string(), 1)
+            }
+        } else if let Some(u) = unit(tokens[i]) {
+            (u.to_string(), 1)
+        } else if let Some(value) = literal(tokens[i]) {
+            (value, 1)
+        } else {
+            negative = false;
+            i += 1;
             continue;
-        }
+        };
+        let display = if negative && !value.starts_with('-') {
+            format!("-{value}")
+        } else {
+            value
+        };
         let start = marks.len() as i64 * HOLD_MS;
         marks.push(SpeechMark {
             start,
             end: start + 1,
-            display: value.replace(',', "."),
+            display,
         });
+        negative = false;
+        i += consumed;
     }
     marks
 }
@@ -196,6 +287,17 @@ mod tests {
             vec!["-12.5", "21:58", "42"]
         );
         assert_eq!(marks[1].start, HOLD_MS);
+        let weather = from_text(
+            "Сейчас плюс два градуса, ночью минус двадцать три. Ветер шесть метров в секунду.",
+        );
+        assert_eq!(
+            weather
+                .iter()
+                .map(|m| m.display.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2", "-23", "6"]
+        );
+        assert!(from_text("Сегодня облачно, температура низкая.").is_empty());
     }
 
     #[test]
