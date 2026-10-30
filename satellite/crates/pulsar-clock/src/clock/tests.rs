@@ -603,8 +603,15 @@ async fn auto_brightness_off_ignores_the_light() {
             assert_eq!(next().await, "5");
             clock.set_auto_brightness(false);
             assert_eq!(next().await, "255");
+            // A dark reading while off leaves the level alone: the brightness change is the
+            // next write.
+            let (half, half_dark) = (level(0.5, 1.0), level(0.5, 0.02));
+            assert!(![5, 255].contains(&half) && ![5, 255, half].contains(&half_dark));
+            clock.set_ambient_lux(0.0);
+            clock.set_brightness(0.5);
+            assert_eq!(next().await, half.to_string());
             clock.set_auto_brightness(true);
-            assert_eq!(next().await, "5");
+            assert_eq!(next().await, half_dark.to_string());
             drop(clock);
             assert!(actors::join_all(Duration::from_secs(1)).await);
         })

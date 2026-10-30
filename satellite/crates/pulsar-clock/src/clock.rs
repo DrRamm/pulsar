@@ -719,7 +719,8 @@ struct Clock {
     /// < 0: unknown, no auto-dimming (only logged).
     lux: f32,
     dimmer: AmbientDimmer,
-    /// false: the level follows the user brightness alone, the light sensor only logs.
+    /// false: the level is the user brightness alone; readings still feed `dimmer`, so turning
+    /// it back on applies the current light at once.
     auto_bri: bool,
     refreshes: u32,
     timers: Timers<Timer>,
