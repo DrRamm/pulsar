@@ -603,15 +603,20 @@ async fn auto_brightness_off_ignores_the_light() {
             assert_eq!(next().await, "5");
             clock.set_auto_brightness(false);
             assert_eq!(next().await, "255");
-            // A dark reading while off leaves the level alone: the brightness change is the
-            // next write.
-            let (half, half_dark) = (level(0.5, 1.0), level(0.5, 0.02));
-            assert!(![5, 255].contains(&half) && ![5, 255, half].contains(&half_dark));
-            clock.set_ambient_lux(0.0);
+            // A reading while off writes nothing but still feeds the dimmer: switching back on
+            // applies the new light.
+            let mut dimmer = AmbientDimmer::new();
+            dimmer.update(0.0);
+            assert!(dimmer.update(1000.0));
+            let (half, half_lit) = (level(0.5, 1.0), level(0.5, dimmer.factor()));
+            assert!(![5, 255].contains(&half) && ![3, 5, 255, half].contains(&half_lit));
+            clock.set_ambient_lux(1000.0);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(take(&current), "");
             clock.set_brightness(0.5);
             assert_eq!(next().await, half.to_string());
             clock.set_auto_brightness(true);
-            assert_eq!(next().await, half_dark.to_string());
+            assert_eq!(next().await, half_lit.to_string());
             drop(clock);
             assert!(actors::join_all(Duration::from_secs(1)).await);
         })

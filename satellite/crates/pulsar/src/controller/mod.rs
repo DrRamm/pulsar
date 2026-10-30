@@ -297,8 +297,9 @@ impl Controller {
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let with_none = |l: Vec<String>| std::iter::once("None".to_owned()).chain(l).collect();
-        // Opened before the entity list: on a station where the model makes it optional the
-        // Illuminance entity exists only when the sensor is there.
+        // Opened before the entity list: the Clock auto brightness switch exists only when the
+        // sensor opened, and where the model makes the sensor optional, so does the Illuminance
+        // entity.
         let lux_rx = match pulsar_clock::spawn_light_sensor(LUX_PERIOD_MS) {
             Ok(rx) => Some(rx),
             Err(e) if model.has_lux => {
