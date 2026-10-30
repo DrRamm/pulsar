@@ -60,18 +60,6 @@ const FLASH_MS: i64 = 1500;
 const CODE_PAGE_MS: i64 = 2000;
 /// Lowest current / brightness that still lights the segments.
 const MIN_LEVEL: i32 = 2;
-const AUTO_DARK_OFF_LUX: f32 = 5.0;
-const AUTO_DARK_ON_LUX: f32 = 10.0;
-
-fn auto_dark(was_dark: bool, lux: f32) -> bool {
-    if lux <= AUTO_DARK_OFF_LUX {
-        true
-    } else if lux >= AUTO_DARK_ON_LUX {
-        false
-    } else {
-        was_dark
-    }
-}
 const TEMPORARY_MS: i64 = 5000;
 const TEMPORARY_MAX_S: i64 = 3600;
 /// Animation frame step (the stock patterns use 20 ms frames).
@@ -193,8 +181,6 @@ impl Default for Range {
 #[derive(Debug)]
 struct Layers {
     enabled: bool,
-    /// The light sensor blanks the display while auto brightness is on.
-    auto_dark: bool,
     /// Monotonic ms of a running countdown; 0 = none.
     timer_end: i64,
     /// ms left of a paused countdown; 0 = none.
@@ -237,7 +223,6 @@ impl Layers {
     fn new() -> Self {
         Self {
             enabled: true,
-            auto_dark: false,
             timer_end: 0,
             timer_paused: 0,
             flash_until: 0,
@@ -445,7 +430,7 @@ impl Layers {
             let g = font::code_glyphs(self.code.as_bytes(), now - self.code_since, CODE_PAGE_MS);
             return (glyph_frame(g, false), 0);
         }
-        if !self.enabled || self.auto_dark {
+        if !self.enabled {
             return (Frame::default(), 0);
         }
         let frame_step = |t0: i64| FX_FRAME_MS - (now - t0) % FX_FRAME_MS;
@@ -736,7 +721,6 @@ struct Clock {
     dimmer: AmbientDimmer,
     /// false: the level follows the user brightness alone, the light sensor only logs.
     auto_bri: bool,
-    dark: bool,
     refreshes: u32,
     timers: Timers<Timer>,
 }
@@ -779,13 +763,10 @@ impl Clock {
             Cmd::SetAmbientLux(lux) => {
                 self.lux = lux.max(0.0);
                 self.dimmer.update(self.lux);
-                self.dark = auto_dark(self.dark, self.lux);
-                l.auto_dark = self.auto_bri && self.dark;
                 self.apply_level();
             }
             Cmd::SetAutoBrightness(on) => {
                 self.auto_bri = on;
-                l.auto_dark = on && self.dark;
                 self.apply_level();
             }
             Cmd::SetTimer { ms_left, running } => l.set_timer(ms_left, running, now),
@@ -873,7 +854,6 @@ pub fn spawn(model: &'static Model) -> ClockHandle {
         lux: -1.0,
         dimmer: AmbientDimmer::new(),
         auto_bri: true,
-        dark: false,
         refreshes: 0,
         timers: Timers::new(),
     };
