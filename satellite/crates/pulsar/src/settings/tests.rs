@@ -328,11 +328,11 @@ fn strtoul_hex_matches_libc() {
 #[test]
 fn clock_auto_brightness_is_always_written() {
     let mut s = Settings::default();
-    assert!(s.clock_auto_bri);
+    assert!(s.clock_auto_brightness);
     assert!(s.serialize().ends_with("clock_auto_brightness=1\n"));
     s.parse(b"clock_auto_brightness=0\n");
-    assert!(!s.clock_auto_bri);
+    assert!(!s.clock_auto_brightness);
     assert!(s.serialize().ends_with("clock_auto_brightness=0\n"));
     s.parse(b"clock_auto_brightness=1\n");
-    assert!(s.clock_auto_bri);
+    assert!(s.clock_auto_brightness);
 }
