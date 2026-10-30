@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2".
+    /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -97,7 +97,7 @@ pub struct Model {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
-    /// sysfs numbering starts at 0 (Midi) or 1 (Lite 2, Mini 2).
+    /// sysfs numbering starts at 0 (Midi, Mini 3) or 1 (Lite 2, Mini 2).
     pub first_index: i32,
     /// "/dev/fb0"; "" = none: sysfs LEDs only.
     pub fb_dev: &'static str,
@@ -115,8 +115,8 @@ pub struct VolumePoint {
     pub raw: i32,
 }
 
-/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in 32 ms VQE chunks
-/// ending with the confirming chunk.
+/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in VQE chunks (32 ms;
+/// 16 ms on the Mini 3) ending with the confirming chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WakePreroll {
     pub id: &'static str,
@@ -164,6 +164,18 @@ const PLUM_PREROLL: &[WakePreroll] = &[
     WakePreroll {
         id: "yandex",
         rule: PrerollRule::Fixed(4),
+    },
+];
+// Mini 3: not measured. Its VQE chunk is 16 ms, so these are the Lite 2's lengths in time
+// (96 ms "alisa", 128 ms "yandex").
+const BERGAMOT_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(6),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(8),
     },
 ];
 
@@ -370,6 +382,68 @@ static MINI2: Model = Model {
     zigbee_boot: "",
 };
 
+// The Mini 3's quasar.cfg platformToAlsaMap: { "0": 0, "1": 33, "20": 255 }.
+const MINI3_VOLUME: &[VolumePoint] = &[
+    VolumePoint { level: 0, raw: 0 },
+    VolumePoint { level: 1, raw: 33 },
+    VolumePoint {
+        level: 20,
+        raw: 255,
+    },
+];
+
+/// Station Mini 3: 32-bit armhf userland on an aarch64 kernel, hw:0,1 physical channels
+/// (asound.conf multi_capture): PDM mics 0-2, ch 6 = the amplifier feedback (TDMB_IN0), the VQE
+/// speaker reference. 6-zone ring, no logo.
+static MINI3: Model = Model {
+    codename: "bergamot",
+    host_prefix: "yandex-mini3-",
+    friendly_name: "Яндекс Станция Мини 3",
+    model_name: "Yandex Station Mini 3",
+    capture_pcm: "hw:0,1",
+    capture_rate: 48000,
+    capture_channels: 8,
+    mic_channels: &[0, 1, 2],
+    spk_channels: &[6],
+    vqe_preset: "bergamot",
+    wake_preroll: BERGAMOT_PREROLL,
+    led_prefix: "bergamot",
+    // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
+    ring: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "logo",
+        trigger: "ledfb-logo",
+        sysfs_kind: "logo",
+    },
+    logo: NO_STRIP,
+    clock_dir: "/sys/class/leds/bergamot:white:clock",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &["DH", "DL"],
+    clock_aux: &["DEGREE"],
+    clock_center: "DM",
+    clock_chip_current: false,
+    // Sold with and without the LED clock (AW21036): segments are looked up at start.
+    has_clock: false,
+    keys_input: "aw933xx",
+    mute_input: "gpio-keys",
+    mute_gpio: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    playback_pcm: "speakers",
+    volume_map: MINI3_VOLUME,
+    volume_min_step: true,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 /// The model of this device, read once; None (logged) on unsupported hardware.
 pub fn detect_model() -> Option<&'static Model> {
     static MODEL: LazyLock<Option<&'static Model>> = LazyLock::new(|| {
@@ -384,13 +458,15 @@ pub fn detect_model() -> Option<&'static Model> {
     *MODEL
 }
 
-/// The model of the first "yandex,cucumber" / "yandex,plum" / "yandex,station-mini2" entry of a
-/// NUL-separated compatible list, e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0".
+/// The model of the first exact "yandex,<codename>" entry of a NUL-separated compatible list,
+/// e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0"; a board variant alone
+/// ("yandex,bergamot-evt1") is no model.
 pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
         b"yandex,station-mini2" => Some(&MINI2),
+        b"yandex,bergamot" => Some(&MINI3),
         _ => None,
     })
 }
@@ -433,6 +509,31 @@ mod tests {
         assert_eq!(m.mute_input, "");
         assert_ne!(m.mute_gpio, 0);
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
+    }
+
+    #[test]
+    fn bergamot_is_mini3() {
+        let m = model_from_compatible(b"yandex,bergamot-evt1\0yandex,bergamot\0amlogic, axg\0")
+            .unwrap();
+        assert_eq!(m.codename, "bergamot");
+        assert_eq!(m.vqe_preset, "bergamot");
+        assert_eq!(m.mic_channels, &[0, 1, 2]);
+        assert_eq!(m.spk_channels, &[6]);
+        assert_eq!(m.ring.count, 6);
+        assert_eq!(m.ring.fb_name, "logo");
+        assert_eq!(m.logo.count, 0);
+        assert!(!m.has_clock && m.has_lux);
+    }
+
+    #[test]
+    fn bergamot_requires_exact_compatible() {
+        // A board variant alone, also next to a non-yandex "bergamot".
+        for raw in [
+            b"yandex,bergamot-evt1\0amlogic, axg\0".as_slice(),
+            b"yandex,bergamot-evt1\0amlogic,bergamot\0".as_slice(),
+        ] {
+            assert!(model_from_compatible(raw).is_none(), "{raw:?}");
+        }
     }
 
     #[test]
