@@ -4,7 +4,7 @@
 use std::error::Error as _;
 use std::ffi::{CStr, CString, c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
 
@@ -220,12 +220,25 @@ pub(crate) fn load_from(soname: &str) -> Result<Lib, String> {
     }
 }
 
+/// Set by pulsar_alsa::init before the first load; empty = the loader's soname lookup.
+static LIB_PATH: OnceLock<&'static str> = OnceLock::new();
+
+pub(crate) fn set_library_path(path: &'static str) {
+    // First setting wins: a later call would be too late for the already-loaded library.
+    let _ = LIB_PATH.set(path);
+}
+
 // Logged once: later calls only see -ENOENT.
-static LIB: LazyLock<Result<Lib, String>> =
-    LazyLock::new(|| load_from(SONAME).inspect_err(|e| log::error!("alsa: {e}")));
+static LIB: OnceLock<Result<Lib, String>> = OnceLock::new();
 
 pub(crate) fn lib() -> Result<&'static Lib, &'static str> {
-    LIB.as_ref().map_err(String::as_str)
+    LIB.get_or_init(|| {
+        let path = LIB_PATH.get().copied().unwrap_or_default();
+        let path = if path.is_empty() { SONAME } else { path };
+        load_from(path).inspect_err(|e| log::error!("alsa: {e}"))
+    })
+    .as_ref()
+    .map_err(String::as_str)
 }
 
 fn uframes(v: u64) -> Uframes {
@@ -518,6 +531,31 @@ impl RawPcm {
     pub(crate) fn readi(
         &mut self,
         buf: &mut [i16],
+        frames: usize,
+        frame_bytes: usize,
+    ) -> Result<usize, i32> {
+        if frame_bytes == 0
+            || frames
+                .checked_mul(frame_bytes)
+                .is_none_or(|n| n > size_of_val(buf))
+        {
+            return Err(-libc::EINVAL);
+        }
+        // SAFETY: see impl comment; `buf` holds at least `frames` frames (checked above).
+        let n = unsafe {
+            (self.lib.pcm_readi)(
+                self.pcm.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                uframes(frames as u64),
+            )
+        };
+        sframes(n)
+    }
+
+    /// [`RawPcm::readi`] for an S32_LE PCM; the caller converts the samples to S16.
+    pub(crate) fn readi_s32(
+        &mut self,
+        buf: &mut [i32],
         frames: usize,
         frame_bytes: usize,
     ) -> Result<usize, i32> {

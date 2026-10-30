@@ -63,6 +63,12 @@ pub struct ApiConfig {
     /// false: no Clock auto brightness switch or its states (listed only with `has_clock` as
     /// well).
     pub has_auto_brightness: bool,
+    /// The model has wake-word pre-roll rules: the switch "Command right after wake word".
+    pub has_wake_preroll: bool,
+    /// The model has a readable hardware microphone mute switch/key.
+    pub has_hw_mic_mute: bool,
+    /// The model has the action button and volume keys (the Event «Button» entity).
+    pub has_buttons: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -83,6 +89,9 @@ impl Default for ApiConfig {
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
+            has_wake_preroll: true,
+            has_hw_mic_mute: true,
+            has_buttons: true,
             has_auto_brightness: true,
             key_path: None,
         }

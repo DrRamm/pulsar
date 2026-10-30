@@ -20,7 +20,7 @@ use std::time::Duration;
 use log::{error, info, warn};
 use pulsar_alsa::{Format, HwRequest, HwTrace, Pcm, Stream};
 use pulsar_core::MusicFrame;
-use pulsar_core::model::{Model, PrerollRule};
+use pulsar_core::model::{CaptureFormat, Model, PrerollRule};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
@@ -32,15 +32,15 @@ const LEVEL_CHUNKS: usize = 47;
 const LEVEL_TOP: usize = 8;
 /// Samples of one level window block: 32 ms at 16 kHz.
 const LEVEL_SAMPLES: usize = 512;
-/// Pre-roll ring: 1.024 s at 16 kHz (32 chunks of 32 ms, 64 of 16 ms on the Mini 3), more
-/// than any wake word's confirmation delay.
+/// Pre-roll ring: 1.024 s at 16 kHz (32 chunks of 32 ms, 64 of 16 ms on the Mini 3 and Mini),
+/// more than any wake word's confirmation delay.
 const PREROLL_SAMPLES: usize = 16384;
 /// End of speech for the "wake timing" log: the newest block within 20 dB (power) of the
 /// loudest one in the level window.
 const SPEECH_END_RATIO: f32 = 0.01;
 
-/// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 (16 ms); the device
-/// may grant less (Lite 2: 2048 frames).
+/// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
+/// the device may grant less (Lite 2: 2048 frames).
 const BUFFER_CHUNKS: u64 = 8;
 const READ_WAIT_MS: i32 = 200;
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
@@ -64,8 +64,8 @@ pub enum FrontendEvent {
     Command {
         word: String,
     },
-    /// 16 kHz mono, one VQE chunk (512 samples, 256 on the Mini 3), while streaming is on or a
-    /// `Wake` is not yet handled.
+    /// 16 kHz mono, one VQE chunk (512 samples, 256 on the Mini 3 and Mini), while streaming is on
+    /// or a `Wake` is not yet handled.
     Audio(Vec<i16>),
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
@@ -391,11 +391,61 @@ impl Fifo {
     }
 }
 
+/// Capture buffer per sample format.
+enum CaptureBuf {
+    S16(Vec<i16>),
+    /// Raw S32 frames and their 16-bit conversion.
+    S32 {
+        raw: Vec<i32>,
+        out: Vec<i16>,
+        shift: u32,
+    },
+}
+
+impl CaptureBuf {
+    fn new(format: CaptureFormat, samples: usize) -> Self {
+        match format {
+            CaptureFormat::S16 => Self::S16(vec![0; samples]),
+            CaptureFormat::S32 { shift } => Self::S32 {
+                raw: vec![0; samples],
+                out: vec![0; samples],
+                shift,
+            },
+        }
+    }
+
+    fn read(&mut self, pcm: &mut Pcm, frames: usize) -> Result<usize, i32> {
+        match self {
+            Self::S16(buf) => pcm.readi(buf, frames),
+            Self::S32 { raw, .. } => pcm.readi_s32(raw, frames),
+        }
+    }
+
+    /// The first `samples` samples read, as the VQE's 16-bit input.
+    fn samples(&mut self, samples: usize) -> &[i16] {
+        match self {
+            Self::S16(buf) => &buf[..samples],
+            Self::S32 { raw, out, shift } => {
+                s32_to_s16(&raw[..samples], *shift, &mut out[..samples]);
+                &out[..samples]
+            }
+        }
+    }
+}
+
+/// S32_LE carries a right-justified 24-bit sample on the Mini: shifting out the low `shift` bits
+/// keeps the sign extension and gives the VQE's 16-bit input; anything wider saturates.
+fn s32_to_s16(src: &[i32], shift: u32, dst: &mut [i16]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d = (s >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    }
+}
+
 fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let nch = model.capture_channels as usize;
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
-    let mut input = vec![0i16; period * nch];
+    let mut buf = CaptureBuf::new(model.capture_format, period * nch);
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
             match open_capture(model, period) {
@@ -407,7 +457,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
             }
             continue;
         };
-        let mut r = p.readi(&mut input, hw_period);
+        let mut r = buf.read(p, hw_period);
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
                 // Ready, or timeout (re-checks running).
@@ -426,7 +476,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
                 continue;
             }
         };
-        let block = &input[..n * nch];
+        let block = buf.samples(n * nch);
         shared.captured_frames.fetch_add(n as u64, Relaxed);
         if shared.tap_on.load(Relaxed)
             && let Some(tap) = lock(&shared.tap).as_ref()
@@ -479,12 +529,16 @@ pub(crate) fn hw_outcome(t: &HwTrace, rate: u32) -> Result<(u64, u64), HwFail> {
     }
 }
 
-/// Opens the model's capture PCM: S16, its channels, exactly its rate (a silent rate mismatch
-/// would feed the VQE and spotters wrongly timed audio), period = one VQE chunk, buffer = 8.
-/// The period may differ (the FIFO decouples ALSA periods from VQE chunks). Returns the PCM and
-/// the frames to read at once.
+/// Opens the model's capture PCM: its sample width (S16 or S32), channels, exactly its rate (a
+/// silent rate mismatch would feed the VQE and spotters wrongly timed audio), period = one VQE
+/// chunk, buffer = 8. The period may differ (the FIFO decouples ALSA periods from VQE chunks).
+/// Returns the PCM and the frames to read at once.
 fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     let dev = model.capture_pcm;
+    let format = match model.capture_format {
+        CaptureFormat::S16 => Format::S16Le,
+        CaptureFormat::S32 { .. } => Format::S32Le,
+    };
     // Non-blocking: reads never wait inside ALSA, so a stop never hangs in snd_pcm_readi.
     let mut pcm = match Pcm::open(dev, Stream::Capture, true) {
         Ok(p) => p,
@@ -494,7 +548,7 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
         }
     };
     let t = pcm.set_hw_params_traced(&HwRequest {
-        format: Format::S16Le,
+        format,
         channels: model.capture_channels,
         rate: model.capture_rate,
         rate_exact: false,
@@ -504,8 +558,10 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     match hw_outcome(&t, model.capture_rate) {
         Ok((per, buf)) => {
             info!(
-                "capture {dev}: {} Hz, {} ch, period {per}, buffer {buf}",
-                t.near.rate, model.capture_channels
+                "capture {dev}: {} Hz, {} ch, {} bits, period {per}, buffer {buf}",
+                t.near.rate,
+                model.capture_channels,
+                model.capture_format.bits()
             );
             let per = usize::try_from(per).unwrap_or(usize::MAX);
             Some((pcm, per.min(period)))
@@ -566,7 +622,8 @@ fn mean_square(d: &[f32]) -> f32 {
 }
 
 /// Mean squares of the last LEVEL_CHUNKS blocks of LEVEL_SAMPLES samples, whatever the VQE
-/// chunk: the Mini 3's VQE gives 16 ms chunks, the window stays 47 × 32 ms on every model.
+/// chunk: the Mini 3's and Mini's VQE give 16 ms chunks, the window stays 47 × 32 ms on every
+/// model.
 struct LevelHistory {
     values: [f32; LEVEL_CHUNKS],
     pos: usize,
@@ -840,6 +897,24 @@ mod tests {
     use super::*;
     use pulsar_alsa::HwResult;
     use pulsar_core::model::model_from_compatible;
+
+    #[test]
+    fn s32_capture_keeps_the_top_16_of_24_bits() {
+        // Right-justified 24-bit samples (the Mini, shift 8): the sign survives the shift, and
+        // a value outside 24 bits saturates instead of wrapping.
+        let src = [
+            -1 << 8,
+            0x007F_FF00,
+            -0x0080_0000,
+            0x0000_00FF,
+            -1,
+            0x0100_0000,
+            i32::MIN,
+        ];
+        let mut dst = [0i16; 7];
+        s32_to_s16(&src, 8, &mut dst);
+        assert_eq!(dst, [-1, 32767, -32768, 0, -1, 32767, -32768]);
+    }
 
     #[test]
     fn level_is_the_mean_of_the_8_loudest_rounded_to_a_tenth() {

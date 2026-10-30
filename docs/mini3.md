@@ -10,7 +10,7 @@
 
 | Узел | Наблюдение / источник |
 | --- | --- |
-| ABI | Linux 4.9.68 aarch64, loader `/lib/ld-linux-armhf.so.3`, glibc 2.30; installer выбирает только armhf |
+| ABI | Linux 4.9.68 aarch64, loader `/lib/ld-linux-armhf.so.3`, glibc 2.30; installer выбирает только armhf (сборка под glibc 2.23 Мини; на Мини 3 после этой смены не запускалась) |
 | RAM | MemTotal около 238 MiB |
 | Capture | `/etc/asound.conf`: `multi_capture` из `hw:0,1`, 8 физических каналов: микрофоны PDM0–2 на каналах 0/1/2, канал 6 — `HW feedback (TDMB_IN0)`, обратный сигнал усилителя (референс динамика для VQE) |
 | VQE | preset `bergamot`, 3 mic + 1 spk: 768 capture frames @ 48000 Hz → 256 samples @ 16000 Hz, 16 ms |

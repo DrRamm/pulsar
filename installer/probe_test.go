@@ -2,6 +2,15 @@ package main
 
 import "testing"
 
+func TestMiniModel(t *testing.T) {
+	if got := modelName("yandexmini"); got != "Yandex Station Mini" {
+		t.Fatalf("modelName(yandexmini) = %q", got)
+	}
+	if hasZigbee("yandexmini") {
+		t.Fatal("hasZigbee(yandexmini) = true")
+	}
+}
+
 func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 	tests := []struct {
 		name, code string
@@ -16,6 +25,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
 		{"bergamot without its loader is skipped", "bergamot", []string{"aarch64"}, ""},
+		{"mini is armhf", "yandexmini", []string{"aarch64", "armhf"}, "armhf"},
+		{"mini without its loader is skipped", "yandexmini", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
 		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
 	}
@@ -25,6 +36,23 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 				t.Fatalf("archOf(%q, %v) = %q, want %q", tt.code, tt.loaders, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestQuasarDeviceType(t *testing.T) {
+	cases := map[string]string{
+		`{"deviceType":"yandexmini"}`:              "yandexmini",
+		"{\n  \"deviceType\" : \"yandexmini\",\n}": "yandexmini",
+		`{"deviceType": "station-mini2"}`:          "station-mini2",
+		`{"other":"yandexmini"}`:                   "",
+		`{"deviceType" "yandexmini"}`:              "",
+		`{"deviceType": yandexmini}`:               "",
+		``:                                         "",
+	}
+	for cfg, want := range cases {
+		if got := quasarDeviceType(cfg); got != want {
+			t.Errorf("quasarDeviceType(%q) = %q, want %q", cfg, got, want)
+		}
 	}
 }
 

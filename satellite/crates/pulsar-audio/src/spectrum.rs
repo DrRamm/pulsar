@@ -1,6 +1,6 @@
 //! Music features from the speaker reference channels of the capture (what the station itself
 //! plays, after the softvol): 8 bands, loudness, beats. One VQE chunk per call (512 samples at
-//! 16 kHz after decimation, 256 on the Mini 3); the FFT runs every 512 samples, on the
+//! 16 kHz after decimation, 256 on the Mini 3 and Mini); the FFT runs every 512 samples, on the
 //! front-end's processing thread.
 //!
 //! Rounding follows the C++ daemon as built for the stations: zig c++ (clang,
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn supported_layouts() {
-        // Midi: 96 kHz, chunk 3072; Lite 2: 48 kHz, chunk 1536; Mini 3: 48 kHz, chunk 768.
+        // Midi: 96 kHz, chunk 3072; Lite 2: 48 kHz, chunk 1536; Mini 3 and Mini: 48 kHz, chunk 768.
         assert!(SpectrumAnalyzer::new(96000, 3072).ok());
         assert!(SpectrumAnalyzer::new(48000, 1536).ok());
         assert!(SpectrumAnalyzer::new(48000, 768).ok());

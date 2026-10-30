@@ -2,13 +2,16 @@
 //! Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys
 //! "aw9610x", mute switch "gpio-keys"; Station Mini 3: touch keys "aw933xx", mute switch
 //! "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch device: the latched mute
-//! line is a GPIO (`Model::mute_gpio`, low = muted), sampled every 100 ms. All use the same key
-//! codes and switch:
+//! line is a GPIO (`Model::mute_gpio`, low = muted), sampled every 100 ms; Station Mini: keypad
+//! "adc_keypad" with only the momentary mute button. The others use the same key codes and
+//! switch:
 //!
 //! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
-//!   KEY_VOICECOMMAND (582) -> Action     (maind: "ACTIVATE")
+//!   Model::action_key (KEY_VOICECOMMAND 582) -> Action
 //!   KEY_VOLUMEUP     (115) -> VolumeUp
 //!   KEY_VOLUMEDOWN   (114) -> VolumeDown
+//!   Model::mute_key  (the Mini's KEY_MUTE 113 on adc_keypad) -> MuteToggle (the mic mute is
+//!   software there)
 //! mute switch (gpio-keys, KEY bitmap bit 113 KEY_MUTE, SW bitmap 0x4000 = SW_MUTE_DEVICE (14)):
 //!   the hardware microphone mute slider/toggle; SW_MUTE_DEVICE=1 means muted. Its KEY_MUTE
 //!   press/release events are ignored, the switch state is authoritative (initial value via
@@ -43,8 +46,6 @@ const EV_SW: u16 = 0x05;
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 const SW_MUTE_DEVICE: u16 = 0x0e;
-/// KEY_VOICECOMMAND
-const KEY_ACTION: u16 = 582;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_VOLUMEUP: u16 = 115;
 
@@ -81,6 +82,9 @@ pub enum InputEvent {
     Button(Button, Press),
     /// Hardware mic mute switch changed (true = muted).
     Mute(bool),
+    /// Momentary mute button that does not latch the microphone itself (the Mini's KEY_MUTE):
+    /// the controller toggles its software mute.
+    MuteToggle,
 }
 
 /// Keeps the input actor alive; the actor stops when the last clone is dropped.
@@ -104,12 +108,12 @@ impl InputHandle {
 pub fn spawn_input(
     model: &'static Model,
 ) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
-    let keys = open_dev(model.keys_input, false);
-    let mute = if model.mute_input.is_empty() {
-        None
-    } else {
-        open_dev(model.mute_input, false)
-    };
+    let keys = (!model.keys_input.is_empty())
+        .then(|| open_dev(model.keys_input, false))
+        .flatten();
+    let mute = (!model.mute_input.is_empty())
+        .then(|| open_dev(model.mute_input, false))
+        .flatten();
     let mute_gpio = if model.mute_gpio == 0 {
         None
     } else {
@@ -120,7 +124,7 @@ pub fn spawn_input(
     }
     let muted = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
-    let mut m = Machine::new(Rc::clone(&muted), tx);
+    let mut m = Machine::new(Rc::clone(&muted), tx, model.action_key, model.mute_key);
     // The state the controller starts from: no event for it.
     if let Some(fd) = &mute {
         m.read_mute_state(fd.get_ref().switch_state(), false);
@@ -276,6 +280,10 @@ struct Machine {
     epoch: Instant,
     muted: Rc<Cell<bool>>,
     tx: UnboundedSender<InputEvent>,
+    /// KEY_VOICECOMMAND of this model; 0: no action button.
+    action_key: u16,
+    /// Momentary mic mute button of this model (`Model::mute_key`); 0: none.
+    mute_key: u16,
     /// Press time; None = not pressed.
     action_down: Option<i64>,
     last_action_ms: Option<i64>,
@@ -299,12 +307,19 @@ fn volume_button(code: u16) -> Button {
 }
 
 impl Machine {
-    fn new(muted: Rc<Cell<bool>>, tx: UnboundedSender<InputEvent>) -> Self {
+    fn new(
+        muted: Rc<Cell<bool>>,
+        tx: UnboundedSender<InputEvent>,
+        action_key: u16,
+        mute_key: u16,
+    ) -> Self {
         Self {
             timers: Timers::new(),
             epoch: Instant::now(),
             muted,
             tx,
+            action_key,
+            mute_key,
             action_down: None,
             last_action_ms: None,
             action_long_sent: false,
@@ -371,7 +386,15 @@ impl Machine {
 
     fn on_key(&mut self, code: u16, value: i32) {
         let now = self.now();
-        if code == KEY_ACTION {
+        if self.mute_key != 0 && code == self.mute_key {
+            // value 1 is the press; 2 is autorepeat and 0 the release.
+            if value == 1 {
+                info!("input: mute button");
+                let _ = self.tx.send(InputEvent::MuteToggle);
+            }
+            return;
+        }
+        if self.action_key != 0 && code == self.action_key {
             if value == 1 && self.action_down.is_none() {
                 self.action_down = Some(now);
                 self.action_long_sent = false;
@@ -486,8 +509,8 @@ impl Machine {
                 return;
             }
         };
-        if self.action_down.is_some() && !test_bit(&b, KEY_ACTION) {
-            self.on_key(KEY_ACTION, 0);
+        if self.action_key != 0 && self.action_down.is_some() && !test_bit(&b, self.action_key) {
+            self.on_key(self.action_key, 0);
         }
         if let Some(code) = self.repeat_code
             && !test_bit(&b, code)
