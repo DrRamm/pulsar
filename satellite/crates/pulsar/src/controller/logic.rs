@@ -241,7 +241,11 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
 /// utterance so questions such as "хватит ли времени" stay with Home Assistant.
 pub fn stt_stop(text: &str) -> bool {
     let text = text.to_lowercase();
-    let trim = |c: char| c.is_whitespace() || c.is_ascii_punctuation() || c == '…';
+    let trim = |c: char| {
+        c.is_whitespace()
+            || c.is_ascii_punctuation()
+            || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
+    };
     let mut text = text.trim_matches(trim);
     for wake in ["алиса", "яндекс"] {
         if let Some(rest) = text.strip_prefix(wake)
