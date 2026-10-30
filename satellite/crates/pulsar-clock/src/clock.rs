@@ -877,7 +877,7 @@ impl ClockHandle {
         self.send(Cmd::SetEnabled(on));
     }
 
-    /// 0..1 user scale, multiplied by the ambient auto-dimming.
+    /// 0..1 user scale; with auto brightness on, the ceiling of the ambient auto-dimming.
     pub fn set_brightness(&self, b: f32) {
         self.send(Cmd::SetBrightness(b));
     }
