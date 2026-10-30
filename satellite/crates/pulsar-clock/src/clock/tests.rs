@@ -568,67 +568,43 @@ async fn actor_draws_commands_and_stops_with_the_handles() {
 
 #[tokio::test]
 async fn auto_brightness_off_ignores_the_light() {
-    let (m, root) = temp_model!("auto_bri", b"yandex,plum\0", "clock");
-    let segs = create_lite2(m, &root);
-    // The level of every lit segment (the Lite 2 writes the level as the segment value).
-    let levels = || -> Vec<u32> {
-        segs.iter()
-            .flatten()
-            .filter_map(|p| std::fs::read_to_string(p).unwrap().trim().parse().ok())
-            .filter(|&v| v > 0)
-            .collect()
-    };
-    // The actor writes while this task yields: wait until every lit segment shows `want`.
-    let settled = |want: u32| async move {
+    // Midi layout: the level is the chips' current, written only when it changes (the periodic
+    // full rewrite covers the segments alone).
+    let (m, root) = temp_model!("auto_bri", b"yandex,cucumber\0", "clock-");
+    for d in 0..DIGITS {
+        for s in 0..SEGS {
+            root.led("clock-", &Leds::seg_name(m, d, s));
+        }
+    }
+    let chip = root.0.join("chip");
+    std::fs::create_dir_all(&chip).unwrap();
+    let current = chip.join("current");
+    std::fs::write(&current, "").unwrap();
+    std::os::unix::fs::symlink(&chip, root.0.join("clock-a1/device")).unwrap();
+    // The next level the actor writes while this task yields.
+    let next = || async {
         for _ in 0..200 {
-            let v = levels();
-            if !v.is_empty() && v.iter().all(|&x| x == want) {
-                return;
+            let v = std::fs::read_to_string(&current).unwrap();
+            if !v.is_empty() {
+                std::fs::write(&current, "").unwrap();
+                return v;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        panic!("segments never showed {want}: {:?}", levels());
-    };
-    // Wait for the actor to finish writing before clearing regular test files.
-    let quiet = || async {
-        let mut last = Vec::new();
-        let mut same = 0;
-        for _ in 0..400 {
-            let v = levels();
-            same = if !v.is_empty() && v == last {
-                same + 1
-            } else {
-                0
-            };
-            if same == 5 {
-                return;
-            }
-            last = v;
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("segments kept changing: {last:?}");
-    };
-    // A sysfs write does not truncate: a shorter value over a longer one leaves digits behind.
-    // Empty the files before a write that must read back exactly.
-    let clear = || {
-        for p in segs.iter().flatten() {
-            std::fs::write(p, "").unwrap();
-        }
+        panic!("no level written");
     };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let clock = spawn(m);
-            clock.set_ambient_lux(0.0);
-            clock.set_text("1234".into());
-            quiet().await;
-            clear();
-            clock.set_auto_brightness(false);
-            settled(255).await;
-            clear();
+            assert_eq!(take(&current), "255");
             // Dark room, auto brightness on: 0.02 of full.
+            clock.set_ambient_lux(0.0);
+            assert_eq!(next().await, "5");
+            clock.set_auto_brightness(false);
+            assert_eq!(next().await, "255");
             clock.set_auto_brightness(true);
-            settled(5).await;
+            assert_eq!(next().await, "5");
             drop(clock);
             assert!(actors::join_all(Duration::from_secs(1)).await);
         })
