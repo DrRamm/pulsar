@@ -38,8 +38,14 @@ binary's `git describe` (the build job checks out the tag, so it does).
 
 ```sh
 go -C installer run . --list         # discover stations (mDNS; --scan = adb port scan of the /24) + model probe
-go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), write /etc/init.d/S99zpulsar, restart
+go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), install autostart when permitted, restart
 ```
+
+The installer writes `/etc/init.d/S99zpulsar` only when the rootfs guard permits it.
+With dm-verity, device-mapper or `/etc` on a separate filesystem, it does not write the file.
+An existing init-script hook or an active legacy `rootkeeper.sh` hook called by `onboot.sh`
+may still provide autostart; without either, pulsar will not start automatically after reboot.
+The installer reports this condition and leaves the existing hooks in place.
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
 (`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `abis()`,
@@ -53,7 +59,7 @@ updates: an update replaces only the binary and the radio images, so a change to
 `satellite/deploy/asound.conf` (e.g. a dmix fix) reaches an installed station only when
 `pulsar-install` runs again.
 
-The binary is `build/<arch>/pulsar` for the model's first ABI in
+The binary is `satellite/build/<arch>/pulsar` for the model's first ABI in
 `abis()` whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 `/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
 that loader (#13). A Lite 2, Mini 2, Mini 3 or Mini without the armhf loader is skipped (no
@@ -86,10 +92,13 @@ background; returns); then `S99zpulsar` (sorts after `S99quasar`; `S99pulsar` wo
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
 (needed after replacing `supervise.sh`; the installer does it when the script changed).
 
-Supervisor (contract in the `supervise.sh` header): exit 0 = deliberate restart (`ctl.sh`, the HA
-"Restart" button), not a crash; a crash loop swaps in `.prev` (bad one kept as `.bad`), and if that
-crash-loops too, removes `enabled` and starts the Yandex stack. Before every launch it removes a
-stale ALSA dmix lock and logs `=== alsa: removed stale dmix lock (…)`; the installer's health check
+Supervisor (contract in the `supervise.sh` header): exit 0 is a deliberate restart (`ctl.sh`,
+HA "Restart") only after at least `MINUP=5` seconds of uptime. A shorter exit, even with
+status 0, counts as a short crash. Five short crashes trigger rollback to `.prev` (bad binary
+kept as `.bad`); if there is no different previous binary, or it also crash-loops, the supervisor
+removes `enabled` and starts the Yandex stack. Only a run of at least `LONG` seconds
+(300 by default) resets the crash count; deliberate shorter restarts leave it unchanged.
+Before every launch it removes a stale ALSA dmix lock and logs `=== alsa: removed stale dmix lock (…)`; the installer's health check
 (a marker ~10 s after the restart, then the log) must not treat that line as a failure.
 
 ### Updates from HA

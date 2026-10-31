@@ -425,8 +425,10 @@ println!("cargo:rustc-link-lib=c++");
 
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
-  binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
-  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains. Local
+  binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. For
+  `software_volume` models (Mini), both keys store the same normalized 0..1 level; no raw
+  control value is involved. Mute zeroes channel and Sendspin gains on all models; on models
+  with an ALSA master control it also writes softvol raw 0 (still -60 dB, not silence). Local
   changes (keys, voice words) play `Model::volume_sound` (`common/volume_sound.mp3`) on ANNOUNCE
   (maind's SimpleVolumeTonePlayer: every change except its sources "other" and "smart_tts") when
   the level (in whole percent) or mute changed, outside LISTENING / SPEAKING and arbitration and
@@ -454,7 +456,9 @@ println!("cargo:rustc-link-lib=c++");
 - `spawn_light_sensor` отдаёт первое значение сразу.
 
 - Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
-  update install keeps it dark from `install_update` until exit). Persisted: `clock_scroll_ms=`,
+  an accepted update install keeps it dark until the current binary exits on success, then
+  `supervise.sh` starts the new binary; on failure, `install_failed()` restores the clock
+  without exiting). Persisted: `clock_scroll_ms=`,
   `clock_music=`, `clock_auto_brightness=`. Player one-shots fire only when the command took
   effect (`music_pause()` returns whether something played; next / previous when Sendspin
   accepted the transport command).
@@ -491,8 +495,11 @@ println!("cargo:rustc-link-lib=c++");
   event; ESPHome forwards INTENT_PROGRESS only once, so nothing arrives while the agent thinks);
   any new path into those phases must go through `start_pipeline`.
 
-- Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
-  replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
+- Pipeline events carry no run id. While awaiting RUN_START, `RunBinding::accept` drops
+  ordinary events and the replaced run's RUN_END. If no active run was replaced, RUN_END
+  is accepted even before RUN_START: HA may end the request without starting a pipeline.
+  In IDLE, events accepted by the binding are ignored except TTS_START: it records the
+  outstanding report and calls `send_tts_report(false)` so HA does not keep waiting.
   `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
 
 - HA's assist satellite stays "responding" from a run's TTS_START until AnnounceFinished, also

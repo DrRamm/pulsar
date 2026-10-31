@@ -77,7 +77,8 @@ own thread with a FIFO. A few overruns an hour remain (`capture: Broken pipe, re
 are expected.
 
 Stale dmix lock (every model; mechanism in the `supervise.sh` header): a process killed while
-playing leaves every later player silent until a reboot, and a daemon restart alone does not help.
+playing can leave later players silent until the stale IPC objects are cleared or the station
+is rebooted. Restarting the daemon without clearing them does not help.
 `supervise.sh` clears it before each launch, `tools/station.sh` in `stop`, `test-stop` and
 `cleanup`; by hand: `ipcrm -M 0x400 -M 0x401 -S 0x400` (the Mini's `minidmix`: `ipcrm -M 0x8e5
 -M 0x8e6 -S 0x8e5`) when `ipcs -m` shows nattch 0 for both.
