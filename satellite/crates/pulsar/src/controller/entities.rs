@@ -67,6 +67,7 @@ impl Controller {
         self.publish_microphones();
         let api = &self.api;
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
+        api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
@@ -156,6 +157,10 @@ impl Controller {
                 self.st.clock_on = state;
                 self.clock.set_enabled(state);
                 self.update_music();
+            }
+            SwitchId::ClockAutoBrightness => {
+                self.st.clock_auto_brightness = state;
+                self.clock.set_auto_brightness(state);
             }
             SwitchId::AutoUpdate => self.st.auto_update = state,
             SwitchId::NearestAnswers => self.st.nearest_answers = state,
@@ -380,6 +385,25 @@ impl Controller {
                 self.update_detection();
                 self.update_ui();
             }
+            InputEvent::MuteToggle => {
+                let muted = !self.mic_muted();
+                info!(
+                    "mic mute button: {}",
+                    if muted { "muted" } else { "unmuted" }
+                );
+                self.st.mic_muted = muted;
+                if muted {
+                    self.cancel_arbitration();
+                    if self.phase == logic::Phase::Listening {
+                        self.finish_interaction();
+                    }
+                }
+                self.update_detection();
+                self.update_ui();
+                self.publish_microphones();
+                // A write cut short by a power loss must not unmute the station.
+                let _ = self.persist_now();
+            }
             InputEvent::Button(Button::Action, p) => {
                 self.api.fire_event(
                     EventId::Button,
@@ -406,7 +430,7 @@ impl Controller {
                     if up { "volume_up" } else { "volume_down" },
                 );
                 self.set_volume(
-                    pulsar_media::mixer::step_level(self.model, self.st.volume, up),
+                    pulsar_core::volume::step_level(self.model, self.st.volume, up),
                     true,
                 );
             }

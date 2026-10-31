@@ -26,7 +26,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
-use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
+use pulsar_alsa::{Format, HwRequest, Pcm};
+use pulsar_core::model::Model;
 use pulsar_core::now_ms;
 
 /// The format playsink converts to (capsfilter before the fdsink) and the PCM is opened with.
@@ -118,12 +119,15 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// Starts the writer thread on PCM `device`; `notify` runs on that thread.
-    pub(crate) fn spawn(device: &str, notify: Box<dyn Fn(OutEvent) + Send>) -> Option<Output> {
+    /// Starts the writer thread on the model's playback PCM; `notify` runs on that thread.
+    pub(crate) fn spawn(
+        model: &'static Model,
+        notify: Box<dyn Fn(OutEvent) + Send>,
+    ) -> Option<Output> {
         let (cmds, rx) = mpsc::channel();
         let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let w = Writer {
-            device: device.to_owned(),
+            model,
             notify,
             gain: Arc::clone(&gain),
             scratch: Vec::new(),
@@ -243,7 +247,7 @@ enum Phase {
 }
 
 struct Writer {
-    device: String,
+    model: &'static Model,
     notify: Box<dyn Fn(OutEvent) + Send>,
     gain: Arc<AtomicU32>,
     /// Gain-scaled PCM on its way to the device.
@@ -342,7 +346,7 @@ impl Writer {
                         Err((step, e)) => {
                             error!(
                                 "player: announce output '{}' {step} failed: {}",
-                                self.device,
+                                self.model.playback_pcm,
                                 pulsar_alsa::strerror(e)
                             );
                             self.finish(OutEvent::Failed(item));
@@ -530,7 +534,7 @@ impl Writer {
     }
 
     fn open(&mut self) -> Result<Pcm, (&'static str, i32)> {
-        let mut pcm = Pcm::open(&self.device, Stream::Playback, false).map_err(|e| ("open", e))?;
+        let mut pcm = pulsar_alsa::open_playback(self.model).map_err(|e| ("open", e))?;
         let hw = pcm
             .set_hw_params(&HwRequest {
                 format: Format::S16Le,
@@ -552,7 +556,7 @@ impl Writer {
         self.low_frames = (LOW_PERIODS * self.period_frames).min(self.buffer_frames / 2);
         debug!(
             "player: announce output '{}' open (period {period}, buffer {} frames)",
-            self.device, hw.buffer_frames
+            self.model.playback_pcm, hw.buffer_frames
         );
         Ok(pcm)
     }

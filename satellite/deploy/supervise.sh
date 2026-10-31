@@ -53,7 +53,8 @@ give_back() { # Yandex stack again, like ctl.sh disable
 clear_dmix() {
   segs=$(ipcs -m 2>/dev/null) || return 0
   removed= busy=0
-  for k in 400 401; do
+  # 0x400/0x401: the firmware's speakers dmix; 0x8e5/0x8e6: the Mini's minidmix.
+  for k in 400 401 8e5 8e6; do
     n=$(echo "$segs" | awk -v k="0x00000$k" '$1 == k { print $6; exit }')
     if [ "$n" = 0 ]; then
       ipcrm -M "0x$k" && removed="$removed shm 0x$k"
@@ -61,9 +62,11 @@ clear_dmix() {
       busy=1
     fi
   done
-  if [ $busy = 0 ] && ipcs -s 2>/dev/null | awk '$1 == "0x00000400" { f = 1 } END { exit !f }'; then
-    ipcrm -S 0x400 && removed="$removed sem 0x400"
-  fi
+  for k in 400 8e5; do
+    if [ $busy = 0 ] && ipcs -s 2>/dev/null | awk -v k="0x00000$k" '$1 == k { f = 1 } END { exit !f }'; then
+      ipcrm -S "0x$k" && removed="$removed sem 0x$k"
+    fi
+  done
   [ -z "$removed" ] || echo "=== alsa: removed stale dmix lock (${removed# }) $(date)" >> "$LOG"
 }
 

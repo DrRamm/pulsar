@@ -46,6 +46,7 @@ pub(super) mod key {
     pub const ACTION_LED_SHOW: u32 = 30;
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
     pub const SW_WAKE_PREROLL: u32 = 32;
+    pub const SW_CLOCK_AUTO_BRI: u32 = 33;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -118,6 +119,7 @@ pub(super) struct Cache {
     media_muted: bool,
     sw_microphones: BoolState,
     sw_clock: BoolState,
+    sw_clock_auto_bri: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
@@ -150,6 +152,7 @@ impl Cache {
             media_muted: false,
             sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
+            sw_clock_auto_bri: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
@@ -245,6 +248,18 @@ impl Server {
         self.send_msg(id, msg::DEVICE_CAPS_RESP, &w);
     }
 
+    fn switch_listed(&self, id: SwitchId) -> bool {
+        match id {
+            SwitchId::Clock => self.cfg.has_clock,
+            SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
+            SwitchId::WakePreroll => self.cfg.has_wake_preroll,
+            SwitchId::Microphones
+            | SwitchId::AutoUpdate
+            | SwitchId::NearestAnswers
+            | SwitchId::VoiceIndication => true,
+        }
+    }
+
     /// The entity list in the C++ order (HA keeps it per device; keys and object_ids must not
     /// move).
     pub(super) fn list_entities(&mut self, id: u64) {
@@ -282,7 +297,7 @@ impl Server {
             "mdi:microphone",
             None,
         ));
-        if self.cfg.has_clock {
+        if self.switch_listed(SwitchId::Clock) {
             out.push(switch(
                 "clock_display",
                 key::SW_CLOCK,
@@ -292,6 +307,15 @@ impl Server {
             ));
         }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
+        if self.switch_listed(SwitchId::ClockAutoBrightness) {
+            out.push(switch(
+                "clock_auto_brightness",
+                key::SW_CLOCK_AUTO_BRI,
+                "Clock auto brightness",
+                "mdi:brightness-auto",
+                cfg,
+            ));
+        }
         out.push(switch(
             "auto_update",
             key::SW_AUTO_UPDATE,
@@ -313,13 +337,15 @@ impl Server {
             "mdi:led-on",
             cfg,
         ));
-        out.push(switch(
-            "command_right_after_wake_word",
-            key::SW_WAKE_PREROLL,
-            "Command right after wake word",
-            "mdi:skip-backward",
-            cfg,
-        ));
+        if self.cfg.has_wake_preroll {
+            out.push(switch(
+                "command_right_after_wake_word",
+                key::SW_WAKE_PREROLL,
+                "Command right after wake word",
+                "mdi:skip-backward",
+                cfg,
+            ));
+        }
         let number = |oid, key, name, icon, (min, max, step): (f32, f32, f32), unit| {
             let mut w = Writer::new();
             entity_head(&mut w, oid, key, name);
@@ -360,14 +386,16 @@ impl Server {
             &self.cfg.music_styles,
             cfg,
         ));
-        out.push(select(
-            "case_color",
-            key::SELECT_CASE_COLOR,
-            "Case color",
-            "mdi:palette",
-            &self.cfg.case_colors,
-            cfg,
-        ));
+        if self.cfg.case_colors.len() > 1 {
+            out.push(select(
+                "case_color",
+                key::SELECT_CASE_COLOR,
+                "Case color",
+                "mdi:palette",
+                &self.cfg.case_colors,
+                cfg,
+            ));
+        }
         if self.cfg.has_clock {
             out.push(select(
                 "clock_music",
@@ -383,16 +411,18 @@ impl Server {
         w.u32(7, ENTITY_CATEGORY_CONFIG, false);
         w.str(8, "firmware", false);
         out.push((msg::LIST_UPDATE, w));
-        let mut w = Writer::new();
-        entity_head(
-            &mut w,
-            "hardware_mic_mute",
-            key::BS_HW_MIC_MUTE,
-            "Hardware mic mute",
-        );
-        w.str(8, "mdi:microphone-off", false);
-        w.u32(9, ENTITY_CATEGORY_DIAGNOSTIC, false);
-        out.push((msg::LIST_BINARY_SENSOR, w));
+        if self.cfg.has_hw_mic_mute {
+            let mut w = Writer::new();
+            entity_head(
+                &mut w,
+                "hardware_mic_mute",
+                key::BS_HW_MIC_MUTE,
+                "Hardware mic mute",
+            );
+            w.str(8, "mdi:microphone-off", false);
+            w.u32(9, ENTITY_CATEGORY_DIAGNOSTIC, false);
+            out.push((msg::LIST_BINARY_SENSOR, w));
+        }
         if self.cfg.has_lux {
             let mut w = Writer::new();
             entity_head(&mut w, "illuminance", key::SENSOR_LUX, "Illuminance");
@@ -421,14 +451,16 @@ impl Server {
         w.packed_u32(12, &[COLOR_MODE_RGB]);
         w.str(14, "mdi:led-strip-variant", false);
         out.push((msg::LIST_LIGHT, w));
-        let mut w = Writer::new();
-        entity_head(&mut w, "button", key::EVENT_BUTTON, "Button");
-        w.str(5, "mdi:gesture-tap-button", false);
-        w.str(8, "button", false);
-        for t in ["action", "action_long", "volume_up", "volume_down"] {
-            w.str(9, t, true);
+        if self.cfg.has_buttons {
+            let mut w = Writer::new();
+            entity_head(&mut w, "button", key::EVENT_BUTTON, "Button");
+            w.str(5, "mdi:gesture-tap-button", false);
+            w.str(8, "button", false);
+            for t in ["action", "action_long", "volume_up", "volume_down"] {
+                w.str(9, t, true);
+            }
+            out.push((msg::LIST_EVENT, w));
         }
-        out.push((msg::LIST_EVENT, w));
         let mut w = Writer::new();
         entity_head(&mut w, "restart", key::BUTTON_RESTART, "Restart");
         w.u32(7, ENTITY_CATEGORY_CONFIG, false);
@@ -689,9 +721,10 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto, nearest, voice, preroll, hw) = (
+        let (mic, clock, auto_bri, auto, nearest, voice, preroll, hw) = (
             c.sw_microphones,
             c.sw_clock,
+            c.sw_clock_auto_bri,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
@@ -701,15 +734,22 @@ impl Server {
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
         self.send_bool(msg::SWITCH_STATE, key::SW_MICROPHONES, mic, to);
-        if has_clock {
+        if self.switch_listed(SwitchId::Clock) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        }
+        if self.switch_listed(SwitchId::ClockAutoBrightness) {
+            self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
         }
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
-        self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
+        if self.cfg.has_wake_preroll {
+            self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
+        }
         self.send_update(to);
-        self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
+        if self.cfg.has_hw_mic_mute {
+            self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
+        }
         if has_lux {
             self.send_float(msg::SENSOR_STATE, key::SENSOR_LUX, lux, to);
         }
@@ -746,12 +786,14 @@ impl Server {
             |c| &c.music_viz,
             to,
         );
-        self.send_cached_str(
-            msg::SELECT_STATE,
-            key::SELECT_CASE_COLOR,
-            |c| &c.case_color,
-            to,
-        );
+        if self.cfg.case_colors.len() > 1 {
+            self.send_cached_str(
+                msg::SELECT_STATE,
+                key::SELECT_CASE_COLOR,
+                |c| &c.case_color,
+                to,
+            );
+        }
         if has_clock {
             self.send_cached_str(
                 msg::SELECT_STATE,
@@ -810,8 +852,14 @@ impl Server {
 
     pub(super) fn publish(&mut self, p: Publish) {
         let on = self.states_on();
-        // Entities the device does not list get no states; their caches are kept all the same.
+        // Entities the device does not list get no states; the config is fixed for the process,
+        // so most of them skip the cache too (the clock text and the switches other than the
+        // clock's are still cached).
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
+        let switch_listed = match &p {
+            Publish::Switch(id, _) => self.switch_listed(*id),
+            _ => false,
+        };
         let c = &mut self.cache;
         match p {
             Publish::Media(st, volume, muted) => {
@@ -823,9 +871,15 @@ impl Server {
                 }
             }
             Publish::Switch(id, v) => {
+                if id == SwitchId::Clock && !self.cfg.has_clock {
+                    return;
+                }
                 let (s, key) = match id {
                     SwitchId::Microphones => (&mut c.sw_microphones, key::SW_MICROPHONES),
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
+                    SwitchId::ClockAutoBrightness => {
+                        (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
+                    }
                     SwitchId::AutoUpdate => (&mut c.sw_auto_update, key::SW_AUTO_UPDATE),
                     SwitchId::NearestAnswers => {
                         (&mut c.sw_nearest_answers, key::SW_NEAREST_ANSWERS)
@@ -837,11 +891,14 @@ impl Server {
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
-                if on && (has_clock || !matches!(id, SwitchId::Clock)) {
+                if on && switch_listed {
                     self.send_bool(msg::SWITCH_STATE, key, s, None);
                 }
             }
             Publish::BinarySensor(BinarySensorId::HwMicMute, v) => {
+                if !self.cfg.has_hw_mic_mute {
+                    return;
+                }
                 c.bs_hw_mute = BoolState { has: true, v };
                 let s = c.bs_hw_mute;
                 if on {
@@ -849,6 +906,9 @@ impl Server {
                 }
             }
             Publish::Sensor(SensorId::Illuminance, v) => {
+                if !self.cfg.has_lux {
+                    return;
+                }
                 c.lux = FloatState { has: true, v };
                 let s = c.lux;
                 if on && has_lux {
@@ -856,6 +916,11 @@ impl Server {
                 }
             }
             Publish::Number(id, v) => {
+                if matches!(id, NumberId::ClockBrightness | NumberId::ClockScroll)
+                    && !self.cfg.has_clock
+                {
+                    return;
+                }
                 let (s, key) = match id {
                     NumberId::ClockBrightness => (&mut c.clock_bri, key::NUMBER_CLOCK_BRI),
                     NumberId::ClockScroll => (&mut c.clock_scroll, key::NUMBER_CLOCK_SCROLL),
@@ -874,6 +939,15 @@ impl Server {
                 self.cache.clock_text = StrState { has: true, v };
             }
             Publish::Select(id, v) => {
+                if matches!(id, SelectId::ClockFace | SelectId::ClockMusic) && !self.cfg.has_clock {
+                    return;
+                }
+                if id == SelectId::CaseColor && self.cfg.case_colors.len() <= 1 {
+                    return;
+                }
+                if id == SelectId::ZigbeeMode && self.cfg.zigbee_modes.is_empty() {
+                    return;
+                }
                 let key = match id {
                     SelectId::ClockFace => key::SELECT_CLOCK_FACE,
                     SelectId::ZigbeeMode => key::SELECT_ZIGBEE_MODE,
@@ -895,10 +969,12 @@ impl Server {
                 *s = StrState { has: true, v };
             }
             Publish::TextSensor(TextSensorId::Zigbee, v) => {
-                if on && !self.cfg.zigbee_modes.is_empty() {
-                    self.send_str(msg::TEXT_SENSOR_STATE, key::TEXT_ZIGBEE, &v, true, None);
+                if !self.cfg.zigbee_modes.is_empty() {
+                    if on {
+                        self.send_str(msg::TEXT_SENSOR_STATE, key::TEXT_ZIGBEE, &v, true, None);
+                    }
+                    self.cache.zigbee_status = StrState { has: true, v };
                 }
-                self.cache.zigbee_status = StrState { has: true, v };
             }
             Publish::Light(st) => {
                 c.light = st;
@@ -907,7 +983,7 @@ impl Server {
                 }
             }
             Publish::Event(EventId::Button, event_type) => {
-                if !on {
+                if !on || !self.cfg.has_buttons {
                     return;
                 }
                 let mut w = Writer::new();

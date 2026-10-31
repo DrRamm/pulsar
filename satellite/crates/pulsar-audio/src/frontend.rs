@@ -20,24 +20,27 @@ use std::time::Duration;
 use log::{error, info, warn};
 use pulsar_alsa::{Format, HwRequest, HwTrace, Pcm, Stream};
 use pulsar_core::MusicFrame;
-use pulsar_core::model::{Model, PrerollRule};
+use pulsar_core::model::{CaptureFormat, Model, PrerollRule};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
-/// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models),
-/// long enough to cover the phrase when the spotter confirms; the loudest frames are the phrase
-/// itself.
+/// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
+/// Long enough to cover the phrase when the spotter confirms; the loudest blocks are the phrase.
 const LEVEL_CHUNKS: usize = 47;
 const LEVEL_TOP: usize = 8;
-/// Pre-roll ring: 1.024 s of VQE chunks, more than any wake word's confirmation delay.
-const PREROLL_CHUNKS: usize = 32;
-/// End of speech for the "wake timing" log: the newest chunk within 20 dB (power) of the
+/// Samples of one level window block: 32 ms at 16 kHz.
+const LEVEL_SAMPLES: usize = 512;
+/// Pre-roll ring: 1.024 s at 16 kHz (32 chunks of 32 ms, 64 of 16 ms on the Mini 3 and Mini),
+/// more than any wake word's confirmation delay.
+const PREROLL_SAMPLES: usize = 16384;
+/// End of speech for the "wake timing" log: the newest block within 20 dB (power) of the
 /// loudest one in the level window.
 const SPEECH_END_RATIO: f32 = 0.01;
 
-/// ALSA buffer in VQE chunks.
+/// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
+/// the device may grant less (Lite 2: 2048 frames).
 const BUFFER_CHUNKS: u64 = 8;
 const READ_WAIT_MS: i32 = 200;
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
@@ -61,10 +64,10 @@ pub enum FrontendEvent {
     Command {
         word: String,
     },
-    /// 16 kHz mono, one VQE chunk (512 samples), while streaming is on or a `Wake` is not yet
-    /// handled.
+    /// 16 kHz mono, one VQE chunk (512 samples, 256 on the Mini 3 and Mini), while streaming is on
+    /// or a `Wake` is not yet handled.
     Audio(Vec<i16>),
-    /// One per VQE chunk (32 ms) while music analysis is on.
+    /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
 }
 
@@ -102,18 +105,23 @@ pub fn spawn(
         shared: Arc::new(Shared::new()),
         pipe: None,
         threads: Vec::new(),
+        frame: 0,
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
     let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
-        Some(eng) => inner
-            .start_threads(model, eng, tx)
-            .inspect_err(|e| error!("audio threads: {e}"))
-            .is_ok(),
+        Some(eng) => {
+            inner.frame = eng.frame();
+            inner
+                .start_threads(model, eng, tx)
+                .inspect_err(|e| error!("audio threads: {e}"))
+                .is_ok()
+        }
         None => false,
     };
     if !started {
         inner.stop();
+        inner.frame = 0;
         error!("microphone front-end failed to start");
     }
     (
@@ -175,6 +183,12 @@ impl FrontendHandle {
             fifo_frames: s.fifo_frames.load(Relaxed),
             dropped_frames: s.dropped_frames.load(Relaxed),
         }
+    }
+
+    /// Samples per [`FrontendEvent::Audio`] chunk (`Engine::frame`); 0 when the front-end did not
+    /// start.
+    pub fn frame(&self) -> usize {
+        self.inner.frame
     }
 
     /// Every block read from ALSA, interleaved as captured (`capture_channels` per frame), goes
@@ -260,6 +274,8 @@ struct Inner {
     shared: Arc<Shared>,
     pipe: Option<Arc<Pipe>>,
     threads: Vec<JoinHandle<()>>,
+    /// Samples per VQE output chunk; 0 without a running engine.
+    frame: usize,
     // Keeps the event channel open: without a front-end, recv() waits forever instead of
     // returning None.
     _events: UnboundedSender<FrontendEvent>,
@@ -375,11 +391,61 @@ impl Fifo {
     }
 }
 
+/// Capture buffer per sample format.
+enum CaptureBuf {
+    S16(Vec<i16>),
+    /// Raw S32 frames and their 16-bit conversion.
+    S32 {
+        raw: Vec<i32>,
+        out: Vec<i16>,
+        shift: u32,
+    },
+}
+
+impl CaptureBuf {
+    fn new(format: CaptureFormat, samples: usize) -> Self {
+        match format {
+            CaptureFormat::S16 => Self::S16(vec![0; samples]),
+            CaptureFormat::S32 { shift } => Self::S32 {
+                raw: vec![0; samples],
+                out: vec![0; samples],
+                shift,
+            },
+        }
+    }
+
+    fn read(&mut self, pcm: &mut Pcm, frames: usize) -> Result<usize, i32> {
+        match self {
+            Self::S16(buf) => pcm.readi(buf, frames),
+            Self::S32 { raw, .. } => pcm.readi_s32(raw, frames),
+        }
+    }
+
+    /// The first `samples` samples read, as the VQE's 16-bit input.
+    fn samples(&mut self, samples: usize) -> &[i16] {
+        match self {
+            Self::S16(buf) => &buf[..samples],
+            Self::S32 { raw, out, shift } => {
+                s32_to_s16(&raw[..samples], *shift, &mut out[..samples]);
+                &out[..samples]
+            }
+        }
+    }
+}
+
+/// S32_LE carries a right-justified 24-bit sample on the Mini: shifting out the low `shift` bits
+/// keeps the sign extension and gives the VQE's 16-bit input; anything wider saturates.
+fn s32_to_s16(src: &[i32], shift: u32, dst: &mut [i16]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d = (s >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    }
+}
+
 fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let nch = model.capture_channels as usize;
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
-    let mut input = vec![0i16; period * nch];
+    let mut buf = CaptureBuf::new(model.capture_format, period * nch);
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
             match open_capture(model, period) {
@@ -391,7 +457,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
             }
             continue;
         };
-        let mut r = p.readi(&mut input, hw_period);
+        let mut r = buf.read(p, hw_period);
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
                 // Ready, or timeout (re-checks running).
@@ -410,7 +476,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
                 continue;
             }
         };
-        let block = &input[..n * nch];
+        let block = buf.samples(n * nch);
         shared.captured_frames.fetch_add(n as u64, Relaxed);
         if shared.tap_on.load(Relaxed)
             && let Some(tap) = lock(&shared.tap).as_ref()
@@ -463,12 +529,16 @@ pub(crate) fn hw_outcome(t: &HwTrace, rate: u32) -> Result<(u64, u64), HwFail> {
     }
 }
 
-/// Opens the model's capture PCM: S16, its channels, exactly its rate (a silent rate mismatch
-/// would feed the VQE and spotters wrongly timed audio), period = one VQE chunk, buffer = 8.
-/// The period may differ (the FIFO decouples ALSA periods from VQE chunks). Returns the PCM and
-/// the frames to read at once.
+/// Opens the model's capture PCM: its sample width (S16 or S32), channels, exactly its rate (a
+/// silent rate mismatch would feed the VQE and spotters wrongly timed audio), period = one VQE
+/// chunk, buffer = 8. The period may differ (the FIFO decouples ALSA periods from VQE chunks).
+/// Returns the PCM and the frames to read at once.
 fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     let dev = model.capture_pcm;
+    let format = match model.capture_format {
+        CaptureFormat::S16 => Format::S16Le,
+        CaptureFormat::S32 { .. } => Format::S32Le,
+    };
     // Non-blocking: reads never wait inside ALSA, so a stop never hangs in snd_pcm_readi.
     let mut pcm = match Pcm::open(dev, Stream::Capture, true) {
         Ok(p) => p,
@@ -478,7 +548,7 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
         }
     };
     let t = pcm.set_hw_params_traced(&HwRequest {
-        format: Format::S16Le,
+        format,
         channels: model.capture_channels,
         rate: model.capture_rate,
         rate_exact: false,
@@ -488,8 +558,10 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     match hw_outcome(&t, model.capture_rate) {
         Ok((per, buf)) => {
             info!(
-                "capture {dev}: {} Hz, {} ch, period {per}, buffer {buf}",
-                t.near.rate, model.capture_channels
+                "capture {dev}: {} Hz, {} ch, {} bits, period {per}, buffer {buf}",
+                t.near.rate,
+                model.capture_channels,
+                model.capture_format.bits()
             );
             let per = usize::try_from(per).unwrap_or(usize::MAX);
             Some((pcm, per.min(period)))
@@ -547,6 +619,49 @@ fn mean_square(d: &[f32]) -> f32 {
         sq = f64::from(v).mul_add(f64::from(v), sq);
     }
     (sq / d.len() as f64) as f32
+}
+
+/// Mean squares of the last LEVEL_CHUNKS blocks of LEVEL_SAMPLES samples, whatever the VQE
+/// chunk: the Mini 3's and Mini's VQE give 16 ms chunks, the window stays 47 × 32 ms on every
+/// model.
+struct LevelHistory {
+    values: [f32; LEVEL_CHUNKS],
+    pos: usize,
+    pending: [f32; LEVEL_SAMPLES],
+    used: usize,
+}
+
+impl LevelHistory {
+    fn new() -> Self {
+        Self {
+            values: [0.0; LEVEL_CHUNKS],
+            pos: 0,
+            pending: [0.0; LEVEL_SAMPLES],
+            used: 0,
+        }
+    }
+
+    fn push(&mut self, mut samples: &[f32]) {
+        while !samples.is_empty() {
+            let n = samples.len().min(LEVEL_SAMPLES - self.used);
+            self.pending[self.used..self.used + n].copy_from_slice(&samples[..n]);
+            self.used += n;
+            samples = &samples[n..];
+            if self.used == LEVEL_SAMPLES {
+                self.values[self.pos] = mean_square(&self.pending);
+                self.pos = (self.pos + 1) % LEVEL_CHUNKS;
+                self.used = 0;
+            }
+        }
+    }
+
+    /// VQE chunks of `frame` samples from the newest sample back to the end of speech
+    /// (`speech_end_chunks` counts blocks; samples of an unfinished block count too).
+    fn speech_end(&self, frame: usize) -> Option<usize> {
+        let newest = (self.pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
+        speech_end_chunks(&self.values, newest)
+            .map(|k| (k * LEVEL_SAMPLES + self.used) / frame.max(1))
+    }
 }
 
 /// The last VQE chunks as s16, for the pre-roll after a wake word.
@@ -656,16 +771,14 @@ fn processing(
     let mut input = vec![0i16; period * nch];
     let mut mics = vec![0f32; period * mic_ch.len()];
     let mut spk = vec![0f32; period * nspk];
-    // Mean square per VQE frame.
-    let mut level_hist = [0f32; LEVEL_CHUNKS];
-    let mut level_pos = 0;
+    let mut level_hist = LevelHistory::new();
     let mut ana = SpectrumAnalyzer::new(model.capture_rate, period);
     if !ana.ok() {
         warn!("music analysis: unsupported capture layout");
     }
     let mut music_was_on = false;
     let frame = eng.frame();
-    let mut ring = PrerollRing::new(PREROLL_CHUNKS, frame);
+    let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
     // Chunks since the wake spotter's 1st-stage hit, while its verifier waits.
     let mut first_stage_age: Option<usize> = None;
 
@@ -712,8 +825,7 @@ fn processing(
         if let Some(d) = eng.output(VQE_OMNI)
             && !d.is_empty()
         {
-            level_hist[level_pos] = mean_square(d);
-            level_pos = (level_pos + 1) % LEVEL_CHUNKS;
+            level_hist.push(d);
         }
 
         // Every chunk goes into the ring, so a pre-roll never spans a gap. A `Wake` not yet
@@ -732,7 +844,10 @@ fn processing(
         }
 
         if shared.detect.load(Relaxed) {
-            first_stage_age = first_stage_age.map(|a| a + 1).filter(|&a| a < LEVEL_CHUNKS);
+            // Kept for the level window's 1.5 s, whatever the VQE chunk.
+            first_stage_age = first_stage_age
+                .map(|a| a + 1)
+                .filter(|&a| a * frame < LEVEL_CHUNKS * LEVEL_SAMPLES);
             let spotted = eng.feed_wake();
             match spotted.stage {
                 Stage::FirstStageHit => first_stage_age = Some(0),
@@ -740,16 +855,15 @@ fn processing(
                 Stage::None => {}
             }
             if !spotted.phrases.is_empty() {
-                let level_db = wake_level_db(&level_hist);
-                let newest = (level_pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
-                let speech_end = speech_end_chunks(&level_hist, newest);
+                let level_db = wake_level_db(&level_hist.values);
+                let speech_end = level_hist.speech_end(frame);
                 let rule = shared
                     .preroll
                     .load(Relaxed)
                     .then(|| model.wake_preroll.iter().find(|p| p.id == eng.wake_id()))
                     .flatten()
                     .map(|p| p.rule);
-                let n = preroll_chunks(rule, first_stage_age).min(PREROLL_CHUNKS);
+                let n = preroll_chunks(rule, first_stage_age).min(ring.chunks());
                 let preroll = ring.last(n);
                 info!(
                     "wake timing: first_stage={} speech_end={} preroll={}",
@@ -785,6 +899,24 @@ mod tests {
     use pulsar_core::model::model_from_compatible;
 
     #[test]
+    fn s32_capture_keeps_the_top_16_of_24_bits() {
+        // Right-justified 24-bit samples (the Mini, shift 8): the sign survives the shift, and
+        // a value outside 24 bits saturates instead of wrapping.
+        let src = [
+            -1 << 8,
+            0x007F_FF00,
+            -0x0080_0000,
+            0x0000_00FF,
+            -1,
+            0x0100_0000,
+            i32::MIN,
+        ];
+        let mut dst = [0i16; 7];
+        s32_to_s16(&src, 8, &mut dst);
+        assert_eq!(dst, [-1, 32767, -32768, 0, -1, 32767, -32768]);
+    }
+
+    #[test]
     fn level_is_the_mean_of_the_8_loudest_rounded_to_a_tenth() {
         assert_eq!(wake_level_db(&[0.0; LEVEL_CHUNKS]), -100.0);
         // 8 frames at 0.01 (-20 dB) among quiet ones, anywhere in the ring.
@@ -806,6 +938,28 @@ mod tests {
         // Clamped to -100..0.
         assert_eq!(wake_level_db(&at(3.0)), 0.0);
         assert_eq!(wake_level_db(&at(-120.0)), -100.0);
+    }
+
+    #[test]
+    fn level_window_is_independent_of_vqe_chunk_size() {
+        let mut full = LevelHistory::new();
+        let mut mini3 = LevelHistory::new();
+        let mut old = [0.0; LEVEL_CHUNKS];
+        for block in 0..LEVEL_CHUNKS + 5 {
+            let samples: Vec<f32> = (0..LEVEL_SAMPLES)
+                .map(|i| ((block * 17 + i * 3) % 97) as f32 / 128.0)
+                .collect();
+            let before = mini3.values.map(f32::to_bits);
+            mini3.push(&samples[..256]);
+            assert_eq!(mini3.values.map(f32::to_bits), before);
+            mini3.push(&samples[256..]);
+            full.push(&samples);
+            old[block % LEVEL_CHUNKS] = mean_square(&samples);
+            assert_eq!(full.values.map(f32::to_bits), old.map(f32::to_bits));
+            assert_eq!(mini3.values.map(f32::to_bits), old.map(f32::to_bits));
+            assert_eq!(mini3.pos, full.pos);
+            assert_eq!(wake_level_db(&mini3.values), wake_level_db(&old));
+        }
     }
 
     #[test]
@@ -865,10 +1019,11 @@ mod tests {
     }
 
     #[test]
-    fn deinterleave_midi_and_lite2_layouts() {
+    fn deinterleave_supported_layouts() {
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
         let lite2 = model_from_compatible(b"yandex,plum\0").unwrap();
-        for m in [midi, lite2] {
+        let mini3 = model_from_compatible(b"yandex,bergamot\0").unwrap();
+        for m in [midi, lite2, mini3] {
             let nch = m.capture_channels as usize;
             let frames = 4;
             // Sample = frame * 100 + channel.

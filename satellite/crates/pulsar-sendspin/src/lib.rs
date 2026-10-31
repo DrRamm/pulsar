@@ -48,9 +48,8 @@ pub struct SendspinConfig {
     pub mac: String,
     /// Identity / pairing persistence directory (created 0700 if missing, not recursively).
     pub state_dir: PathBuf,
-    /// ALSA PCM of the player sink (`Model::playback_pcm`), mixed with the GStreamer channels by
-    /// its dmix.
-    pub playback_pcm: &'static str,
+    /// Model of this station: playback PCM and output gates.
+    pub model: &'static pulsar_core::model::Model,
     pub port: u16,
 }
 
@@ -134,10 +133,10 @@ mod tests {
             software_version: String::new(),
             mac: String::new(),
             state_dir: PathBuf::from("/nonexistent"),
-            playback_pcm: "speakers",
+            model: pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap(),
             port: 0,
         };
-        match spawn(cfg, 0.2, false) {
+        match spawn(cfg, 0.2, false, 1.0) {
             Err(e) => assert_eq!(e, "sendspin: built without sendspin-cpp"),
             Ok(_) => panic!("spawned without sendspin-cpp"),
         }

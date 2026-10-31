@@ -20,6 +20,8 @@ use std::thread::JoinHandle;
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use pulsar_core::model::Model;
+
 use crate::gst::{self, Api, Call, MainLoop, Pipeline};
 use crate::pcm_out::{self, OutEvent, Output};
 
@@ -275,6 +277,8 @@ pub(crate) trait Backend: Send {
     fn out_end(&mut self);
     /// ANNOUNCE's pipeline is in NULL: the output drops the current item and stops at once.
     fn out_flush(&mut self);
+    /// MUSIC's pipeline reached PLAYING: its alsasink has the device open.
+    fn music_playing(&mut self);
 }
 
 /// State shared by the handle (runtime thread) and the GLib thread.
@@ -625,6 +629,7 @@ impl Machine {
                 }
                 // ANNOUNCE is PLAYING once its output started (OutEvent::Started).
                 if new == GstState::Playing as i32 && ch == Channel::Music {
+                    self.backend.music_playing();
                     let c = &mut self.chans[i];
                     c.reached_playing = true;
                     if c.want_play && !c.buffering {
@@ -820,6 +825,7 @@ pub(crate) fn on_timer(tag: usize) -> bool {
 /// The firmware's GStreamer: one playbin per channel.
 struct GstBackend {
     api: &'static Api,
+    model: &'static Model,
     // Dropped before `out`: the pipelines are in NULL when the output closes the fdsink's fd.
     pipes: [Pipeline; 2],
     out: Output,
@@ -827,7 +833,17 @@ struct GstBackend {
 
 impl Backend for GstBackend {
     fn set_state(&mut self, ch: Channel, s: GstState) -> bool {
+        // MUSIC's alsasink opens the device asynchronously after this call, and dmix may switch
+        // the amplifier off when another client closes meanwhile: the gates go on here and again
+        // in `music_playing`. ANNOUNCE is not played by GStreamer (pcm_out opens the PCM itself).
+        if s == GstState::Playing && ch == Channel::Music {
+            pulsar_alsa::enable_output(self.model);
+        }
         self.pipes[ch.index()].set_state(s as i32)
+    }
+
+    fn music_playing(&mut self) {
+        pulsar_alsa::enable_output(self.model);
     }
 
     fn set_uri(&mut self, ch: Channel, uri: &str) {
@@ -927,9 +943,9 @@ impl Drop for GlibThread {
 // The fdsink of ANNOUNCE's output (pcm_out); playsink converts to its caps.
 const OUT_SINK: &CStr = c"pcmout";
 
-fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
+fn new_pipeline(api: &'static Api, ch: Channel, model: &'static Model) -> Option<Pipeline> {
     let sink = match ch {
-        Channel::Music => format!("alsasink device={pcm}"),
+        Channel::Music => format!("alsasink device={}", model.playback_pcm),
         Channel::Announce => format!(
             "capsfilter caps=\\\"{}\\\" ! fdsink name={} sync=false",
             pcm_out::CAPS,
@@ -949,7 +965,7 @@ fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
 }
 
 /// dlopen + gst_init + static plugin registration + the GLib thread (C++ Player::init).
-fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
+fn start(shared: &Arc<Shared>, model: &'static Model) -> Option<GlibThread> {
     // One player per process: its GLib thread owns the default main context.
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::Relaxed) {
@@ -964,15 +980,23 @@ fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
         return None;
     }
     let pipes = [
-        new_pipeline(api, Channel::Music, pcm)?,
-        new_pipeline(api, Channel::Announce, pcm)?,
+        new_pipeline(api, Channel::Music, model)?,
+        new_pipeline(api, Channel::Announce, model)?,
     ];
     let out = Output::spawn(
-        pcm,
+        model,
         Box::new(move |ev| gst::idle_add(api, Box::new(move || on_out(ev)))),
     )?;
     let main_loop = Arc::new(MainLoop::new(api)?);
-    let machine = Machine::new(Box::new(GstBackend { api, pipes, out }), Arc::clone(shared));
+    let machine = Machine::new(
+        Box::new(GstBackend {
+            api,
+            model,
+            pipes,
+            out,
+        }),
+        Arc::clone(shared),
+    );
     let ml = Arc::clone(&main_loop);
     let thread = std::thread::Builder::new()
         .name("gst".into())
@@ -1009,13 +1033,13 @@ pub struct PlayerHandle {
     inner: Rc<Inner>,
 }
 
-/// Starts the player on ALSA PCM `pcm` (`Model::playback_pcm`). A failed dlopen / gst_init is
-/// logged ("player init failed") and gives a degraded handle: every play() ends with Done(false)
-/// at once and state() stays Idle.
-pub fn spawn(pcm: &str) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
+/// Starts the player on the model's ALSA PCM (`Model::playback_pcm`) with its output gates. A
+/// failed dlopen / gst_init is logged ("player init failed") and gives a degraded handle: every
+/// play() ends with Done(false) at once and state() stays Idle.
+pub fn spawn(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     let (tx, rx) = unbounded_channel();
     let shared = Arc::new(Shared::new(tx));
-    let exec = start(&shared, pcm).map(|t| Box::new(t) as Box<dyn Exec>);
+    let exec = start(&shared, model).map(|t| Box::new(t) as Box<dyn Exec>);
     if exec.is_none() {
         error!("player init failed");
     }
@@ -1259,6 +1283,7 @@ mod tests {
             let mut f = self.0.lock().unwrap();
             !(s != GstState::Null && std::mem::take(&mut f.fail_next_start))
         }
+        fn music_playing(&mut self) {}
         fn set_uri(&mut self, ch: Channel, uri: &str) {
             self.log(format!("ch{} uri {uri}", ch.index()));
         }
@@ -1935,7 +1960,8 @@ mod tests {
     #[test]
     fn degraded_player_fails_every_play_at_once() {
         // No firmware GStreamer on the host: spawn() gives the degraded handle.
-        let (h, mut rx) = spawn("speakers");
+        let model = pulsar_core::model::model_from_compatible(b"yandex,cucumber\0").unwrap();
+        let (h, mut rx) = spawn(model);
         let a = h.play(Music, urls(&["/a.mp3"]));
         assert_eq!(rx.try_recv().unwrap(), Done { id: a, ok: false });
         h.pause(Music);

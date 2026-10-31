@@ -36,7 +36,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
 use crate::led_fx::{self as fx, Col};
-use crate::sys::Framebuffer;
+use crate::sys::{Framebuffer, I2c};
 
 /// ~30 fps while animating (stock 20 ms frames resampled by time).
 const FRAME_MS: u64 = 33;
@@ -396,7 +396,18 @@ impl LedsHandle {
 pub fn spawn_leds(model: &'static Model) -> LedsHandle {
     let n = usize::try_from(model.ring.count).unwrap_or(0);
     let nlogo = usize::try_from(model.logo.count).unwrap_or(0);
-    let sink = if let Some(fb) = open_fb(model, nlogo) {
+    let sink = if !model.ring.i2c_dev.is_empty() {
+        match open_i2c(model, n, nlogo) {
+            Some(sink) => {
+                info!(
+                    "leds: driving {n} ring LEDs via i2c {}@0x{:02x}",
+                    model.ring.i2c_dev, model.ring.i2c_addr
+                );
+                sink
+            }
+            None => Sink::None,
+        }
+    } else if let Some(fb) = open_fb(model, nlogo) {
         info!("leds: driving {n} ring + {nlogo} logo LEDs via framebuffer");
         fb
     } else if let Some(files) = open_sysfs(model, n, nlogo) {
@@ -420,7 +431,12 @@ enum TimerKey {
     Frame,
     /// One-shot at the next end of timed content while nothing moves.
     Expiry,
+    /// A write failed on a static frame: retry it even though nothing changes.
+    Retry,
 }
+
+/// Retry period of a failed static frame (the I²C ring is the only sink that reports errors).
+const RETRY_MS: u64 = 1000;
 
 async fn run(mut comp: Compositor, mut out: Output, mut rx: UnboundedReceiver<Cmd>, opened: bool) {
     let epoch = Instant::now();
@@ -453,9 +469,10 @@ async fn run(mut comp: Compositor, mut out: Output, mut rx: UnboundedReceiver<Cm
 
 fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>, now: i64) {
     let animated = comp.frame(now);
-    out.write(&comp.px, now);
+    let failed = out.write(&comp.px, now);
     if animated {
         timers.cancel(TimerKey::Expiry);
+        timers.cancel(TimerKey::Retry);
         if !timers.is_set(TimerKey::Frame) {
             timers.set_repeating(TimerKey::Frame, FRAME_MS, FRAME_MS);
         }
@@ -463,6 +480,13 @@ fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>,
     }
     timers.cancel(TimerKey::Frame);
     timers.cancel(TimerKey::Expiry);
+    if failed {
+        // Nothing will change the pixels any more; a dropped frame would stay dark until the
+        // next command. Retry while the sink keeps failing.
+        timers.set(TimerKey::Retry, RETRY_MS);
+    } else {
+        timers.cancel(TimerKey::Retry);
+    }
     if let Some(e) = comp.next_expiry(now) {
         timers.set(TimerKey::Expiry, u64::try_from(e - now).unwrap_or(0));
     }
@@ -480,6 +504,11 @@ enum Sink {
     Fb {
         ring: Framebuffer,
         logo: Option<Framebuffer>,
+    },
+    /// IS31FL3236-compatible 18-channel controller (6 RGB pixels).
+    I2c {
+        dev: I2c,
+        addr: u16,
     },
     /// [ring r,g,b x n][logo r,g,b x nlogo]
     Sysfs(Vec<File>),
@@ -531,9 +560,11 @@ impl Output {
         self.write(&off, now);
     }
 
-    fn write(&mut self, px: &[u8], now: i64) {
+    /// Writes changed pixels; true when a sink reported an error and the frame should be retried.
+    fn write(&mut self, px: &[u8], now: i64) -> bool {
         let split = self.n * 3;
         let have_last = self.has_last;
+        let mut failed = false;
         match &mut self.sink {
             Sink::None => {}
             #[cfg(test)]
@@ -544,7 +575,7 @@ impl Output {
             }
             Sink::Fb { ring, logo } => {
                 if !have_last || px[..split] != self.last[..split] {
-                    write_fb(
+                    failed |= !write_fb(
                         ring,
                         &px[..split],
                         &mut self.bgr,
@@ -556,7 +587,7 @@ impl Output {
                 if let Some(logo) = logo
                     && (!have_last || px[split..] != self.last[split..])
                 {
-                    write_fb(
+                    failed |= !write_fb(
                         logo,
                         &px[split..],
                         &mut self.bgr,
@@ -564,6 +595,23 @@ impl Output {
                         "logo fb",
                         now,
                     );
+                }
+            }
+            Sink::I2c { dev, addr } => {
+                if !have_last || px[..split] != self.last[..split] {
+                    let mut bgr = [0u8; 18];
+                    for (i, p) in px[..split].as_chunks::<3>().0.iter().enumerate() {
+                        bgr[i * 3..i * 3 + 3].copy_from_slice(&[p[2], p[1], p[0]]);
+                    }
+                    // 0x01: first PWM register; 0x25 = 0xAA latches the frame.
+                    let r = dev
+                        .write_register(*addr, 0x01, &bgr)
+                        .and_then(|()| dev.write_register(*addr, 0x25, &[0xaa]));
+                    if let Err(e) = r {
+                        warn_write(&mut self.warn[0], "i2c", &e, now);
+                        // Keep `last` as it was: the retry must send these pixels again.
+                        return true;
+                    }
                 }
             }
             Sink::Sysfs(files) => {
@@ -574,8 +622,13 @@ impl Output {
                 }
             }
         }
+        if failed {
+            // Keep `last` as it was, so the retry does not skip these pixels.
+            return true;
+        }
         self.last.copy_from_slice(px);
         self.has_last = true;
+        false
     }
 }
 
@@ -587,17 +640,24 @@ fn write_fb(
     w: &mut WriteWarn,
     what: &str,
     now: i64,
-) {
+) -> bool {
     bgr.clear();
     for p in px.as_chunks::<3>().0 {
         bgr.extend_from_slice(&[p[2], p[1], p[0]]);
     }
-    match fb.write(bgr) {
-        Ok(k) if k == bgr.len() => {}
-        Ok(_) => warn_write(w, what, &io::Error::from(io::ErrorKind::WriteZero), now),
-        Err(e) => warn_write(w, what, &e, now),
-    }
+    let ok = match fb.write(bgr) {
+        Ok(k) if k == bgr.len() => true,
+        Ok(_) => {
+            warn_write(w, what, &io::Error::from(io::ErrorKind::WriteZero), now);
+            false
+        }
+        Err(e) => {
+            warn_write(w, what, &e, now);
+            false
+        }
+    };
     fb.pan();
+    ok
 }
 
 fn warn_write(w: &mut WriteWarn, what: &str, err: &io::Error, now: i64) {
@@ -655,6 +715,37 @@ fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
             None
         }
     }
+}
+
+/// IS31FL3236-compatible controller: enable the output stage, set every channel's current and
+/// clear the PWM registers; the stock firmware sends the same three writes.
+fn open_i2c(model: &Model, n: usize, nlogo: usize) -> Option<Sink> {
+    if n != 6 || nlogo != 0 {
+        warn!("leds: i2c backend expects 6 ring LEDs and no logo ({n} + {nlogo})");
+        return None;
+    }
+    let dev = match I2c::open(model.ring.i2c_dev) {
+        Ok(dev) => dev,
+        Err(e) => {
+            warn!("leds: open {}: {}", model.ring.i2c_dev, crate::errstr(&e));
+            return None;
+        }
+    };
+    let addr = model.ring.i2c_addr;
+    let imax = [3u8; 18];
+    if let Err(e) = dev
+        .write_register(addr, 0x00, &[1])
+        .and_then(|()| dev.write_register(addr, 0x26, &imax))
+        .and_then(|()| dev.write_register(addr, 0x4b, &[1]))
+    {
+        warn!(
+            "leds: init {}@0x{addr:02x}: {}",
+            model.ring.i2c_dev,
+            crate::errstr(&e)
+        );
+        return None;
+    }
+    Some(Sink::I2c { dev, addr })
 }
 
 fn open_fb(model: &Model, nlogo: usize) -> Option<Sink> {

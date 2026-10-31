@@ -25,18 +25,18 @@ impl Controller {
     }
 
     /// Mute: softvol raw 0 is the bottom of its dB range (-60 dB on the Midi), still audible, so
-    /// mute also zeroes the software gains of both playback channels and Sendspin.
+    /// mute also zeroes the software gains of both playback channels and Sendspin. On models
+    /// without a usable ALSA master (the Mini) this is also where the master volume is applied.
     pub(super) fn apply_gains(&self) {
+        let master = pulsar_core::volume::master_gain(self.model, self.st.volume);
         let music = if self.st.muted {
             0.0
-        } else if self.ducked {
-            DUCK_GAIN
         } else {
-            1.0
+            master * if self.ducked { DUCK_GAIN } else { 1.0 }
         };
         self.player.set_channel_gain(Channel::Music, music);
         self.player
-            .set_channel_gain(Channel::Announce, if self.st.muted { 0.0 } else { 1.0 });
+            .set_channel_gain(Channel::Announce, if self.st.muted { 0.0 } else { master });
         if let Some(ss) = &self.sendspin {
             ss.set_duck_gain(music);
         }
@@ -62,8 +62,8 @@ impl Controller {
         if self.st.muted && feedback {
             self.st.muted = false;
             self.mixer.set_muted(false);
-            self.apply_gains();
         }
+        self.apply_gains();
         if feedback {
             self.leds.show_volume(self.st.volume);
             // mul_add: the station C++ fuses `volume * 100 + 0.5` (fmadd on aarch64, vfma.f32 on
@@ -196,7 +196,7 @@ impl Controller {
                 MediaCommand::VolumeUp | MediaCommand::VolumeDown => {
                     let up = c == MediaCommand::VolumeUp;
                     self.set_volume(
-                        pulsar_media::mixer::step_level(self.model, self.st.volume, up),
+                        pulsar_core::volume::step_level(self.model, self.st.volume, up),
                         false,
                     );
                 }

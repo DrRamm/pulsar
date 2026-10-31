@@ -219,6 +219,7 @@ pub fn spawn(
     cfg: SendspinConfig,
     volume: f32,
     muted: bool,
+    master_gain: f32,
 ) -> Result<(SendspinHandle, UnboundedReceiver<SendspinEvent>), String> {
     ffi::set_log_level_info();
     if !persist::ensure_dir(&cfg.state_dir) {
@@ -226,15 +227,17 @@ pub fn spawn(
     }
     let unpaired = persist::unpaired_access(&cfg.state_dir);
     let (tx, rx) = unbounded_channel();
+    let initial_gain = if muted { 0.0 } else { master_gain };
     let ctx = Arc::new(Ctx {
         events: Mutex::new(Vec::new()),
-        sink: Sink::new(cfg.playback_pcm),
+        sink: Sink::new(cfg.model),
         state_dir: cfg.state_dir.clone(),
         tx,
         hooks: AtomicBool::new(true),
         vis_loudness: AtomicU32::new(0),
         vis_beat: AtomicBool::new(false),
     });
+    ctx.sink.set_gain(initial_gain);
     let config = Config {
         name: &cfg.name,
         product_name: &cfg.product_name,
@@ -572,7 +575,7 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         let ctx = Ctx {
             events: Mutex::new(Vec::new()),
-            sink: Sink::new("speakers"),
+            sink: Sink::new(pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap()),
             state_dir: PathBuf::from("/nonexistent"),
             tx,
             hooks: AtomicBool::new(true),

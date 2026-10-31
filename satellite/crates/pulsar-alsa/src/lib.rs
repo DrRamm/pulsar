@@ -7,6 +7,23 @@
 mod ffi;
 
 use ffi::{HwParams, MixerValue, RawCtl, RawPcm, SwParams};
+use pulsar_core::model::Model;
+
+/// Applies the model's process-wide ALSA settings before any thread or audio library starts:
+/// ALSA_CONFIG_PATH and the absolute libasound path (the Mini's firmware keeps it outside the
+/// loader's search path). With such a path the library is loaded here, before GStreamer: dlopen
+/// with RTLD_GLOBAL makes libquasar_gstreamer's NEEDED `libasound.so.2` resolve to this copy by
+/// SONAME whether or not that library carries a RUNPATH (not checked on a Mini). The other models
+/// keep the lazy SONAME lookup: an early `libasound.so.2` dlopen from the executable (no RUNPATH)
+/// could pick another copy than GStreamer's RUNPATH does. Must be called before the first [`load`].
+pub fn init(model: &Model) {
+    model.apply_env();
+    ffi::set_library_path(model.alsa_lib);
+    if !model.alsa_lib.is_empty() {
+        // A failed dlopen is logged by ffi::lib.
+        let _ = ffi::lib();
+    }
+}
 
 /// Loads libasound.so.2 once; every other call loads it on demand. Err = dlerror text.
 pub fn load() -> Result<(), String> {
@@ -223,6 +240,11 @@ impl Pcm {
         self.raw.readi(buf, frames, self.frame_bytes)
     }
 
+    /// `buf` must hold `frames` frames of the configured S32 format (else -EINVAL).
+    pub fn readi_s32(&mut self, buf: &mut [i32], frames: usize) -> Result<usize, i32> {
+        self.raw.readi_s32(buf, frames, self.frame_bytes)
+    }
+
     /// `buf` must hold `frames` frames of the configured format (else -EINVAL).
     pub fn writei(&mut self, buf: &[u8], frames: usize) -> Result<usize, i32> {
         self.raw.writei(buf, frames, self.frame_bytes)
@@ -245,6 +267,46 @@ impl Pcm {
     pub fn recover(&mut self, err: i32, silent: bool) -> Result<(), i32> {
         ok(self.raw.recover(err, silent))
     }
+}
+
+/// Writes an integer mixer element on card 0, e.g. the Mini's "SPK mute" switch (1 = on).
+/// Opens the control for every call, as the stock firmware does before each playback start.
+pub fn set_mixer_integer(name: &str, values: &[i64]) -> Result<(), i32> {
+    let ctl = Ctl::open("hw:0")?;
+    ctl.write_integers(name, values)
+}
+
+/// Switches the model's output on: the sysfs amplifier gates and the ALSA "SPK mute" mixer.
+/// Opening a PCM or dmix dropping its last client may switch the gates off again, so this runs
+/// both before and after a device is opened.
+pub fn enable_output(model: &Model) {
+    for path in model.amp_enable_paths {
+        if !pulsar_core::sysfs::write_file(path, "1\n") {
+            log::warn!("amp: cannot write '{path}'");
+        }
+    }
+    if !model.spk_mute_ctl.is_empty()
+        && let Err(e) = set_mixer_integer(model.spk_mute_ctl, &[1])
+    {
+        log::warn!(
+            "spk: cannot unmute '{}': {}",
+            model.spk_mute_ctl,
+            strerror(e)
+        );
+    }
+}
+
+/// Opens the model's playback PCM with the output gates on. Gates are enabled before the open (a
+/// device must never start muted) and again afterwards: dmix turns the amplifier off when its
+/// last client closes, so another channel may have closed it between our two calls. All PCM
+/// openers in the daemon use this; the MUSIC pipeline, whose alsasink opens the device inside
+/// GStreamer, instead calls [`enable_output`] before it starts the pipeline and again when the
+/// pipeline reports PLAYING (the device is open by then).
+pub fn open_playback(model: &Model) -> Result<Pcm, i32> {
+    enable_output(model);
+    let pcm = Pcm::open(model.playback_pcm, Stream::Playback, false)?;
+    enable_output(model);
+    Ok(pcm)
 }
 
 pub struct Ctl {

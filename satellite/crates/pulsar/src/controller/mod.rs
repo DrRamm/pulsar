@@ -43,9 +43,8 @@ const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // starts), and conversation agents (LLMs with tool calls) may think for a minute or more.
 const LISTEN_TIMEOUT_MS: u64 = 30_000;
 const PROCESS_TIMEOUT_MS: u64 = 120_000;
-// Updates: releases of this repository on GitHub. The first check waits for the network after
-// boot; an automatic install waits until the speaker is idle (it restarts the daemon).
-const UPDATE_REPO: &str = "Morvex885/pulsar";
+// Updates: releases of this repository on GitHub. The first check waits for the network
+// after boot; an automatic install waits until the speaker is idle (it restarts the daemon).
 const UPDATE_FIRST_CHECK_MS: u64 = 60_000;
 const UPDATE_CHECK_PERIOD_MS: u64 = 6 * 3_600_000;
 const UPDATE_IDLE_RETRY_MS: u64 = 10 * 60_000;
@@ -302,8 +301,9 @@ impl Controller {
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let with_none = |l: Vec<String>| std::iter::once("None".to_owned()).chain(l).collect();
-        // Opened before the entity list: on a station where the model makes it optional the
-        // Illuminance entity exists only when the sensor is there.
+        // Opened before the entity list: the Clock auto brightness switch exists only when the
+        // sensor opened, and where the model makes the sensor optional, so does the Illuminance
+        // entity.
         let lux_rx = match pulsar_clock::spawn_light_sensor(LUX_PERIOD_MS) {
             Ok(rx) => Some(rx),
             Err(e) if model.has_lux => {
@@ -343,9 +343,13 @@ impl Controller {
                     .map(|r| r.label.to_owned())
                     .collect()
             },
-            key_path: Some(logic::in_dir(&dir, "api_key")),
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
+            has_wake_preroll: !model.wake_preroll.is_empty(),
+            has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
+            has_buttons: model.has_button_events(),
+            key_path: Some(logic::in_dir(&dir, "api_key")),
+            has_auto_brightness: lux_rx.is_some(),
         };
         // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
         // a failure exits before the hardware starts. Nothing reaches the server before `run`.
@@ -353,14 +357,16 @@ impl Controller {
             .map_err(|_| "ESPHome API server failed to start".to_owned())?;
         // Before any other thread exists: the player's spawn sets SSL_CERT_FILE (set_var), which
         // C code on another thread could be reading.
-        let (player, player_rx) = pulsar_media::spawn(model.playback_pcm);
+        let (player, player_rx) = pulsar_media::spawn(model);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 
         // Hardware first: UI feedback should work even if HA is not connected.
         let leds = pulsar_hw::spawn_leds(model);
+        // spawn handles an absent panel (empty clock_dir) with a no-op handle.
         let clock = pulsar_clock::spawn(model);
         clock.set_enabled(st.clock_on);
         clock.set_brightness(st.clock_brightness);
+        clock.set_auto_brightness(st.clock_auto_brightness);
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());
@@ -385,7 +391,7 @@ impl Controller {
             st.volume_legacy,
             st.legacy_on_stock,
             mixer.volume(),
-            |v| pulsar_media::mixer::from_legacy(model, v),
+            |v| pulsar_core::volume::from_legacy(model, v),
         );
         st.volume = volume;
         // Changes made while starting are written like any other (StateFile, 1 s later).
@@ -426,7 +432,8 @@ impl Controller {
                 );
             }
         }
-        let (updater, updater_rx) = pulsar_update::spawn(UPDATE_REPO.into(), VERSION.into());
+        let (updater, updater_rx) =
+            pulsar_update::spawn(pulsar_update::UPDATE_REPO.into(), VERSION.into());
 
         let (input, input_rx) = match pulsar_hw::spawn_input(model) {
             Ok((h, rx)) => (Some(h), Some(rx)),
@@ -450,17 +457,19 @@ impl Controller {
             software_version: id.project_version.clone(),
             mac: id.mac.to_ascii_lowercase(),
             state_dir: logic::in_dir(&dir, "sendspin"),
-            playback_pcm: model.playback_pcm,
+            model,
             port: ports.sendspin,
         };
-        let (sendspin, sendspin_rx) = match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted) {
-            Ok((h, rx)) => (Some(h), Some(rx)),
-            Err(e) => {
-                debug!("{e}");
-                error!("Sendspin player unavailable");
-                (None, None)
-            }
-        };
+        let master = pulsar_core::volume::master_gain(model, st.volume);
+        let (sendspin, sendspin_rx) =
+            match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted, master) {
+                Ok((h, rx)) => (Some(h), Some(rx)),
+                Err(e) => {
+                    debug!("{e}");
+                    error!("Sendspin player unavailable");
+                    (None, None)
+                }
+            };
 
         // A test instance (port offset) stays invisible to HA and Music Assistant.
         let mdns = if ports.offset == 0 {
@@ -799,7 +808,7 @@ impl Controller {
     /// `st` changed: written a moment after the last change (`StateFile`). `volume=` follows
     /// `volume2=` on the curve of earlier builds.
     fn persist(&mut self) {
-        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.st.volume_legacy = pulsar_core::volume::to_legacy(self.model, self.st.volume);
         self.state.changed();
     }
 
@@ -808,7 +817,7 @@ impl Controller {
     /// stays pending (`StateFile`).
     #[must_use = "a write that must be on disk has to check it"]
     fn persist_now(&mut self) -> bool {
-        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.st.volume_legacy = pulsar_core::volume::to_legacy(self.model, self.st.volume);
         self.state.write_now(&self.st)
     }
 

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use log::{debug, error, info};
-use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
+use pulsar_alsa::{Format, HwRequest, Pcm};
+use pulsar_core::model::Model;
 
 use crate::ffi::now_us;
 use crate::gain;
@@ -39,8 +40,8 @@ pub(crate) struct Sink {
 
 /// Audio thread state (under `Sink::io`).
 struct Io {
-    /// ALSA PCM name (`Model::playback_pcm`).
-    device: &'static str,
+    /// Playback PCM and output gates of the model.
+    model: &'static Model,
     pcm: Option<Pcm>,
     active: bool,
     want_rate: u32,
@@ -72,10 +73,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Sink {
-    pub(crate) fn new(device: &'static str) -> Self {
+    pub(crate) fn new(model: &'static Model) -> Self {
         Self {
             io: Mutex::new(Io {
-                device,
+                model,
                 pcm: None,
                 active: false,
                 want_rate: 0,
@@ -120,7 +121,20 @@ impl Sink {
     }
 
     pub(crate) fn set_gain(&self, g: f32) {
-        self.target_gain.store(g.clamp(0.0, 1.0).to_bits(), SeqCst);
+        let g = g.clamp(0.0, 1.0);
+        self.target_gain.store(g.to_bits(), SeqCst);
+        // No stream yet (or the device is closed): start the first frame at the new gain instead
+        // of ramping down from 1.0. A desktop/phone volume change before playback is immediate.
+        //
+        // Never block on `io`: the sync thread holds it across a whole `write` (including
+        // `pcm.wait`), and this runs in the controller's event loop on every volume step; a
+        // blocking lock here would stall every channel until the write returns. A running
+        // stream picks `target_gain` up in its ramp anyway.
+        if let Ok(mut io) = self.io.try_lock()
+            && (!io.active || io.pcm.is_none())
+        {
+            io.gain = g;
+        }
     }
 
     fn target_gain(&self) -> f32 {
@@ -356,9 +370,8 @@ impl Io {
                 return false;
             }
         };
-        let device = self.device;
         let mut opened = false;
-        let res = Pcm::open(device, Stream::Playback, false)
+        let res = pulsar_alsa::open_playback(self.model)
             .map_err(|e| ("open", e))
             .and_then(|mut pcm| {
                 opened = true;
@@ -389,7 +402,8 @@ impl Io {
             Err((step, err)) => {
                 if !self.open_failed_logged {
                     error!(
-                        "sendspin: ALSA '{device}' {step} failed for {} Hz/{} ch/{} bit: {}",
+                        "sendspin: ALSA '{}' {step} failed for {} Hz/{} ch/{} bit: {}",
+                        self.model.playback_pcm,
                         self.want_rate,
                         self.want_channels,
                         self.want_bits,
@@ -398,7 +412,7 @@ impl Io {
                 }
                 self.open_failed_logged = true;
                 if opened {
-                    info!("sendspin: ALSA '{device}' closed");
+                    info!("sendspin: ALSA '{}' closed", self.model.playback_pcm);
                 }
                 self.next_open_us = now + REOPEN_RETRY_US;
                 return false;
@@ -417,7 +431,8 @@ impl Io {
         self.delay_max = 0;
         self.stats_us = now;
         info!(
-            "sendspin: ALSA '{device}' open {} Hz/{} ch/{} bit (period {period}, buffer {buffer} frames = {:.0} ms)",
+            "sendspin: ALSA '{}' open {} Hz/{} ch/{} bit (period {period}, buffer {buffer} frames = {:.0} ms)",
+            self.model.playback_pcm,
             self.rate,
             self.channels,
             self.bits,
@@ -428,7 +443,7 @@ impl Io {
 
     fn close(&mut self) {
         if self.pcm.take().is_some() {
-            info!("sendspin: ALSA '{}' closed", self.device);
+            info!("sendspin: ALSA '{}' closed", self.model.playback_pcm);
         }
     }
 
